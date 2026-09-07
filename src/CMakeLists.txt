@@ -5,5 +5,5 @@ FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
 
 idf_component_register(
     SRCS ${app_sources}
-    REQUIRES led_strip
+    PRIV_REQUIRES led_strip nvs_flash esp_partition
 )
