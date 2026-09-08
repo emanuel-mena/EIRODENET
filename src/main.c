@@ -10,9 +10,9 @@
 #include "led_strip_rmt.h"
 
 #include "app_storage.h"
+#include "board_pins.h"
 #include "model_partition.h"
 
-#define NEOPIXEL_GPIO 26
 #define NEOPIXEL_COUNT 1
 
 static const char *TAG = "eirodenet";
@@ -52,7 +52,7 @@ static void persistent_data_init(void)
 static void neopixel_init(void)
 {
     led_strip_config_t strip_config = {
-        .strip_gpio_num = NEOPIXEL_GPIO,
+        .strip_gpio_num = IDEABOARD_RGB_LED,
         .max_leds = NEOPIXEL_COUNT,
         .led_model = LED_MODEL_WS2812,
         .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,

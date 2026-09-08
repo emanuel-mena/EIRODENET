@@ -12,7 +12,7 @@
 #define IDEABOARD_M2_A 13
 #define IDEABOARD_M2_B 15
 
-/* Commonly used IdeaBoard expansion examples. */
+#define IDEABOARD_RGB_LED 2
+
 #define IDEABOARD_DAC_1 26
 #define IDEABOARD_DAC_2 25
-
