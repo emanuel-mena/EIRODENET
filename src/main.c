@@ -11,12 +11,14 @@
 
 #include "app_storage.h"
 #include "board_pins.h"
+#include "lsm6ds3tr_c.h"
 #include "model_partition.h"
 
 #define NEOPIXEL_COUNT 1
 
 static const char *TAG = "eirodenet";
 static led_strip_handle_t neopixel;
+static lsm6ds3tr_c_handle_t imu;
 
 static void persistent_data_init(void)
 {
@@ -93,27 +95,84 @@ static void neopixel_set_rgb(uint8_t r, uint8_t g, uint8_t b)
     );
 }
 
+static esp_err_t imu_init(void)
+{
+    const lsm6ds3tr_c_config_t config = {
+        .sda_gpio = IDEABOARD_I2C_SDA,
+        .scl_gpio = IDEABOARD_I2C_SCL,
+        .i2c_address = LSM6DS3TR_C_I2C_ADDRESS_DEFAULT,
+        .i2c_clock_hz = 400000,
+    };
+
+    esp_err_t err = lsm6ds3tr_c_init(&config, &imu);
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "No se pudo iniciar LSM6DS3TR-C en I2C 0x%02X (SDA=%d, SCL=%d): %s",
+            config.i2c_address,
+            config.sda_gpio,
+            config.scl_gpio,
+            esp_err_to_name(err)
+        );
+        return err;
+    }
+
+    uint8_t device_id = 0;
+    err = lsm6ds3tr_c_read_device_id(imu, &device_id);
+    if (err == ESP_OK) {
+        ESP_LOGI(
+            TAG,
+            "LSM6DS3TR-C listo: direccion=0x%02X, WHO_AM_I=0x%02X",
+            config.i2c_address,
+            device_id
+        );
+    }
+    return err;
+}
+
 void app_main(void)
 {
     persistent_data_init();
     neopixel_init();
+    const bool imu_ready = imu_init() == ESP_OK;
+
+    unsigned int color_index = 0;
 
     while (1)
     {
-        // Turquesa
-        neopixel_set_rgb(0, 210, 180);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        static const uint8_t colors[][3] = {
+            {0, 210, 180},
+            {145, 40, 255},
+            {255, 95, 0},
+            {0, 0, 0},
+        };
+        neopixel_set_rgb(
+            colors[color_index][0],
+            colors[color_index][1],
+            colors[color_index][2]
+        );
+        color_index = (color_index + 1) % (sizeof(colors) / sizeof(colors[0]));
 
-        // Violeta
-        neopixel_set_rgb(145, 40, 255);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (imu_ready) {
+            lsm6ds3tr_c_sample_t sample;
+            esp_err_t err = lsm6ds3tr_c_read_sample(imu, &sample);
+            if (err == ESP_OK) {
+                ESP_LOGI(
+                    TAG,
+                    "IMU T=%.2f C | accel[g] X=%.3f Y=%.3f Z=%.3f | gyro[dps] X=%.2f Y=%.2f Z=%.2f",
+                    sample.temperature_c,
+                    sample.accel_g[0],
+                    sample.accel_g[1],
+                    sample.accel_g[2],
+                    sample.gyro_dps[0],
+                    sample.gyro_dps[1],
+                    sample.gyro_dps[2]
+                );
+            } else {
+                ESP_LOGE(TAG, "Fallo al leer LSM6DS3TR-C: %s", esp_err_to_name(err));
+            }
+        }
 
-        // Ambar
-        neopixel_set_rgb(255, 95, 0);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
-        // Apagar
-        neopixel_set_rgb(0, 0, 0);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
