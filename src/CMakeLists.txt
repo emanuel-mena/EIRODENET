@@ -6,5 +6,6 @@ file(
 idf_component_register(
     SRCS ${app_sources}
     INCLUDE_DIRS "../include"
-    PRIV_REQUIRES led_strip nvs_flash esp_partition esp_driver_i2c
+    PRIV_REQUIRES led_strip nvs_flash esp_partition esp_driver_i2c esp_driver_gpio
+        esp_driver_ledc esp_timer esp_adc esp_wifi esp_event esp_netif
 )

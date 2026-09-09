@@ -20,6 +20,7 @@ MODEL_PARTITION_SIZE = 0x200000
 
 
 def build_image(model_path: Path, output_path: Path, model_version: int) -> None:
+    """Empaqueta un FlatBuffer TFL3 en una imagen EIRM validable por firmware."""
     model = model_path.read_bytes()
     if not model:
         raise ValueError("the model file is empty")
@@ -51,6 +52,7 @@ def build_image(model_path: Path, output_path: Path, model_version: int) -> None
 
 
 def find_esptool() -> Path:
+    """Localiza el esptool instalado en el entorno de PlatformIO."""
     core_dir = Path(os.environ.get("PLATFORMIO_CORE_DIR", Path.home() / ".platformio"))
     esptool = core_dir / "packages" / "tool-esptoolpy" / "esptool.py"
     if not esptool.is_file():
@@ -59,6 +61,7 @@ def find_esptool() -> Path:
 
 
 def validate_image(image_path: Path) -> bytes:
+    """Valida cabecera, tamaño, firma TFL3 y CRC32 de una imagen EIRM."""
     image = image_path.read_bytes()
     if len(image) < HEADER.size:
         raise ValueError("model image is smaller than its header")
@@ -81,6 +84,7 @@ def validate_image(image_path: Path) -> bytes:
 
 
 def flash_image(image_path: Path, port: str) -> None:
+    """Valida y escribe una imagen EIRM exclusivamente en la partición model."""
     image = validate_image(image_path)
     if len(image) > MODEL_PARTITION_SIZE:
         raise ValueError("image is larger than the model partition")
@@ -100,6 +104,7 @@ def flash_image(image_path: Path, port: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Construye y procesa la interfaz de línea de comandos."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -115,6 +120,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Ejecuta el subcomando solicitado y devuelve un código de salida."""
     args = parse_args()
     try:
         if args.command == "build":
