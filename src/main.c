@@ -1,20 +1,12 @@
 #include <inttypes.h>
-#include <stdbool.h>
-
 #include "app_storage.h"
-#include "board_pins.h"
-#include "color_sensor_adapter.h"
 #include "esp_err.h"
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "generated_secrets.h"
-#include "imu_adapter.h"
-#include "infrared_adapter.h"
-#include "internet_adapter.h"
 #include "model_partition.h"
 #include "motor_adapter.h"
-#include "ultrasonic_adapter.h"
+#include "rover_service.h"
+#include "serial_protocol.h"
 
 static const char *TAG = "rover";
 
@@ -67,59 +59,10 @@ void app_main(void)
     }
     report_model();
 
-    const esp_err_t ultrasonic_init_err = ultrasonic_adapter_init();
-    const bool ultrasonic_ready = ultrasonic_init_err == ESP_OK;
-    const esp_err_t infrared_init_err = infrared_adapter_init();
-    const bool infrared_ready = infrared_init_err == ESP_OK;
-    ESP_LOGI(TAG, "Ultrasonico init: %s; infrarrojos init: %s",
-             esp_err_to_name(ultrasonic_init_err), esp_err_to_name(infrared_init_err));
-
-    const esp_err_t imu_init_err = imu_adapter_init();
-    const bool imu_ready = imu_init_err == ESP_OK;
-    ESP_LOGI(TAG, "IMU LSM6DS3TR-C: %s", esp_err_to_name(imu_init_err));
-
-    const bool color_ready = color_sensor_adapter_init() == ESP_OK;
-
-    err = internet_adapter_init();
+    err = rover_service_start();
+    ESP_LOGI(TAG, "Servicios del rover: %s", esp_err_to_name(err));
     if (err == ESP_OK) {
-        err = internet_adapter_connect(15000);
-    }
-    ESP_LOGI(TAG, "Conexion Wi-Fi: %s", esp_err_to_name(err));
-
-    while (true) {
-        uint32_t distance_mm = 0;
-        infrared_adapter_state_t infrared = { 0 };
-        lsm6ds3tr_c_sample_t imu = { 0 };
-        color_sensor_adapter_sample_t color = { 0 };
-        if (ultrasonic_ready) {
-            const esp_err_t read_err = ultrasonic_adapter_read_mm(&distance_mm);
-            if (read_err == ESP_OK) {
-                ESP_LOGI(TAG, "Ultrasonico: %" PRIu32 " mm", distance_mm);
-            } else {
-                ESP_LOGW(TAG, "Ultrasonico sin eco: %s", esp_err_to_name(read_err));
-            }
-        }
-        if (infrared_ready && infrared_adapter_read(&infrared) == ESP_OK) {
-            ESP_LOGI(TAG, "IR FI=%d FD=%d TI=%d TD=%d", infrared.front_left,
-                     infrared.front_right, infrared.rear_left, infrared.rear_right);
-        }
-        if (imu_ready) {
-            const esp_err_t read_err = imu_adapter_read(&imu);
-            if (read_err == ESP_OK) {
-                ESP_LOGI(TAG, "IMU acc[g]=%.3f,%.3f,%.3f gyro[dps]=%.2f,%.2f,%.2f",
-                         imu.accel_g[0], imu.accel_g[1], imu.accel_g[2],
-                         imu.gyro_dps[0], imu.gyro_dps[1], imu.gyro_dps[2]);
-            } else {
-                ESP_LOGW(TAG, "Fallo de lectura IMU: %s", esp_err_to_name(read_err));
-            }
-        } else {
-            ESP_LOGW(TAG, "IMU no disponible; revise GPIO%d/GPIO%d y direccion 0x%02X",
-                     BOARD_IMU_SDA_GPIO, BOARD_IMU_SCL_GPIO, BOARD_IMU_I2C_ADDRESS);
-        }
-        if (color_ready && color_sensor_adapter_read(&color) == ESP_OK) {
-            ESP_LOGI(TAG, "Color ADC ambiente=%u R=%u G=%u B=%u",
-                     color.ambient, color.red, color.green, color.blue);
-        }
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        err = serial_protocol_start();
+        ESP_LOGI(TAG, "Consola de configuracion: %s", esp_err_to_name(err));
     }
 }

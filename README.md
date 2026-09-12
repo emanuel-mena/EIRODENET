@@ -12,7 +12,7 @@ drivers de ESP-IDF.
 
 ## Estado del hardware probado
 
-El firmware compila, se carga y funciona en el rover conectado por COM3. La última
+El firmware compila, se carga y funciona en el rover conectado por USB. La última
 prueba confirmó conexión Wi-Fi, lectura estable del LSM6DS3TR-C, los cuatro TCRT5000
 y distancias ultrasónicas cercanas a 0.55 m. Motor 1 y Motor 2 respondieron en ambos
 sentidos durante una prueba controlada al 30 %. La prueba automática fue retirada:
@@ -60,6 +60,8 @@ resistencias pull-up/pull-down internas.
 | Driver IMU | `lsm6ds3tr_c.h` | Registros I2C, identificación y conversión física |
 | Motores | `motor_adapter.h` | PWM independiente, sentido y parada segura |
 | TinyML | `model_partition.h` | Localización y validación de la imagen del modelo |
+| Servicios | `rover_service.h` | Muestreo concurrente, calibración y fusión de orientación |
+| Serial | `serial_protocol.h` | Configuración y telemetría NDJSON sobre UART0 |
 
 Todas las APIs públicas incluyen documentación JavaDoc/Doxygen con parámetros,
 valores de retorno, unidades y precondiciones.
@@ -98,24 +100,110 @@ Se requiere PlatformIO Core y una conexión USB con el controlador CH340 disponi
 Desde PowerShell:
 
 ```powershell
+$env:EIRO_PORT = "PUERTO_SERIAL"
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run
-& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -t upload --upload-port COM3
-& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" device monitor --port COM3 --baud 115200
+& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -t upload --upload-port $env:EIRO_PORT
+& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" device monitor --port $env:EIRO_PORT --baud 115200
 ```
 
 La carga normal actualiza bootloader, tabla de particiones y aplicación, pero no
-escribe la partición `model`. Sustituya COM3 cuando el sistema asigne otro puerto.
+escribe la partición `model`.
 
 ## Diagnóstico de arranque
 
 `app_main()` inicializa los motores en cero antes que el resto del hardware, abre
-NVS, valida el modelo, inicializa sensores, conecta Wi-Fi y publica lecturas cada dos
-segundos. Un sensor o modelo ausente no impide el funcionamiento de los demás
-módulos. El monitor serie utiliza 115200 baudios.
+NVS, valida el modelo e inicia los servicios de sensores, Wi-Fi y protocolo serial.
+El IMU se adquiere a 100 Hz; la telemetría solicitada por la GUI se publica a 20 Hz,
+5 Hz y 1 Hz según el tema. Un sensor o modelo ausente no impide el funcionamiento
+de los demás módulos. El monitor serie utiliza 115200 baudios.
 
 En reposo, el acelerómetro debe medir aproximadamente 1 g sobre el eje alineado con
 la gravedad. El giroscopio puede presentar un pequeño offset estacionario; debe
 calibrarse antes de usarlo para navegación inercial acumulativa.
+
+## Aplicación de configuración y diagnóstico
+
+La aplicación de escritorio permite editar SSID, contraseña, IPv4/puerto del
+servidor y MAC del rover compañero. También muestra valores y gráficas de 60
+segundos para todos los sensores, el estado Wi-Fi y el modelo tridimensional
+`tools/assets/Mini Rover.glb` orientado con el IMU.
+
+En Windows, instale las dependencias y ejecute la interfaz desde la raíz:
+
+```powershell
+python -m venv tools\.venv
+.\tools\.venv\Scripts\Activate.ps1
+python -m pip install -r tools\requirements-gui.txt
+python tools\rover_gui\main.py
+```
+
+En Linux:
+
+```bash
+python3 -m venv tools/.venv
+source tools/.venv/bin/activate
+python -m pip install -r tools/requirements-gui.txt
+python tools/rover_gui/main.py
+```
+
+Seleccione el puerto de la IdeaBoard y pulse **Conectar**. La contraseña se
+transmite por el enlace USB porque puede leerse de vuelta, pero siempre se muestra
+enmascarada inicialmente; el botón **Mostrar/Ocultar** permite cambiar su
+visibilidad. La pantalla también muestra como dato de solo lectura la MAC Wi-Fi STA
+del propio rover. Al cambiar las credenciales la placa confirma NVS y reconecta la
+estación Wi-Fi sin reiniciar el resto del firmware.
+
+### Calibración IMU de seis caras
+
+Abra la pestaña de calibración, pulse **Iniciar** y coloque sucesivamente el eje
+indicado (`+X`, `-X`, `+Y`, `-Y`, `+Z`, `-Z`) apuntando hacia arriba. Mantenga el
+rover inmóvil durante los dos segundos de cada captura. Las seis caras deben ser
+aceptadas antes de guardar; una captura rechazada no elimina las anteriores y
+cancelar conserva la calibración persistente previa.
+
+Al seleccionar una cara, el panel derecho anima el modelo 3D desde su posición
+normal hasta el apoyo requerido. La tríada superpuesta identifica X en rojo, Y en
+verde y Z en azul; la flecha amarilla permanece fija para indicar la vertical.
+
+El visor permite fijar la orientación actual como cero. El LSM6DS3TR-C no contiene
+magnetómetro, por lo que roll y pitch se corrigen con gravedad, pero el yaw puede
+derivar lentamente.
+
+Todas las lecturas y caras usan el marco del rover, no el marco impreso del chip.
+Debido al montaje del IMU, la conversión aplicada es `X=-Xchip`, `Y=-Ychip` y
+`Z=Zchip`. La versión de calibración se incrementa cuando cambia esta conversión,
+por lo que parámetros antiguos incompatibles se descartan de forma segura.
+
+La misma calibración puede ejecutarse sin interfaz gráfica. La CLI informa la
+media y desviación de cada eje, la cara realmente detectada, el ángulo de
+desalineación y las causas concretas de cualquier rechazo:
+
+```text
+python tools/rover_cli.py probe --seconds 4
+python tools/rover_cli.py calibrate
+```
+
+La CLI detecta automáticamente un único adaptador CH340. Si hay varios puertos,
+use `--port PUERTO_SERIAL`. En Linux el usuario debe pertenecer al grupo propietario
+del dispositivo serie, habitualmente `dialout` o `uucp`.
+
+Antes de cada captura el firmware descarta 0.5 segundos para permitir que el rover
+termine de asentarse. La cara solicitada debe ser dominante y quedar dentro de
+aproximadamente 30 grados de la vertical; se recomienda usar soportes o cuñas para
+que las ruedas y la carrocería no determinen una inclinación incorrecta.
+
+## Protocolo serial
+
+UART0 opera a 115200 baudios. Cada trama de aplicación es una línea JSON precedida
+por `@EIRO `; de este modo los consumidores pueden ignorar los logs ESP-IDF. La
+versión actual es `1`, el límite es 1024 bytes y las peticiones contienen `id`,
+`cmd` y, cuando corresponde, `data` o `face`.
+
+Los comandos son `device.info`, `config.get`, `config.set`, `stream.start`,
+`stream.stop`, `calibration.start`, `calibration.capture`, `calibration.commit` y
+`calibration.cancel`. La telemetría se divide en los temas `imu` (20 Hz), `sensors`
+(5 Hz) y `status` (1 Hz). Las respuestas repiten el identificador y contienen
+`ok`, `data` o un objeto `error`; los cambios de calibración llegan como eventos.
 
 ## Modelos TinyML
 
@@ -129,7 +217,7 @@ longitud y CRC32:
 
 ```powershell
 & "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" tools/model_tool.py build modelo.tflite .pio/build/model.bin --version 1
-& "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" tools/model_tool.py flash .pio/build/model.bin --port COM3
+& "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" tools/model_tool.py flash .pio/build/model.bin --port $env:EIRO_PORT
 ```
 
 El comando `flash` vuelve a validar cabecera, firma, límites y CRC antes de escribir.

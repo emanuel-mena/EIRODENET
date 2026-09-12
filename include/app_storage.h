@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -10,6 +11,28 @@
 
 #define APP_STORAGE_WIFI_SSID_MAX_LENGTH 32
 #define APP_STORAGE_WIFI_PASSWORD_MAX_LENGTH 64
+#define APP_STORAGE_IPV4_MAX_LENGTH 15
+#define IMU_CALIBRATION_VERSION 2U
+
+/** @brief Calibración persistente del IMU, expresada en las unidades del adapter. */
+typedef struct {
+    uint32_t version;
+    bool valid;
+    float accel_offset_g[3];
+    float accel_scale[3];
+    float gyro_bias_dps[3];
+} imu_calibration_t;
+
+/** @brief Configuración completa y persistente del rover. */
+typedef struct {
+    char wifi_ssid[APP_STORAGE_WIFI_SSID_MAX_LENGTH + 1];
+    char wifi_password[APP_STORAGE_WIFI_PASSWORD_MAX_LENGTH + 1];
+    bool server_configured;
+    char server_ipv4[APP_STORAGE_IPV4_MAX_LENGTH + 1];
+    uint16_t server_port;
+    bool peer_configured;
+    uint8_t peer_mac[6];
+} app_storage_config_t;
 
 /** @brief Credenciales Wi-Fi con espacio para terminadores nulos. */
 typedef struct {
@@ -55,3 +78,15 @@ esp_err_t app_storage_get_wifi_credentials(app_storage_wifi_credentials_t *crede
  * @return ESP_OK, ESP_ERR_INVALID_ARG u otro error de NVS.
  */
 esp_err_t app_storage_set_wifi_credentials(const char *ssid, const char *password);
+
+/** @brief Lee toda la configuración; los campos ausentes se devuelven vacíos. */
+esp_err_t app_storage_get_config(app_storage_config_t *config);
+
+/** @brief Valida y guarda toda la configuración en una única transacción NVS. */
+esp_err_t app_storage_set_config(const app_storage_config_t *config);
+
+/** @brief Lee la calibración IMU persistente y valida su versión y valores. */
+esp_err_t app_storage_get_imu_calibration(imu_calibration_t *calibration);
+
+/** @brief Valida y guarda la calibración IMU. */
+esp_err_t app_storage_set_imu_calibration(const imu_calibration_t *calibration);

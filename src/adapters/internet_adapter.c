@@ -16,6 +16,8 @@ static EventGroupHandle_t s_events;
 static esp_netif_t *s_station;
 static int s_retries;
 static bool s_started;
+static bool s_wifi_started;
+static bool s_reconfiguring;
 static uint32_t s_ipv4_address;
 
 static void wifi_event_handler(void *argument, esp_event_base_t base, int32_t id, void *data)
@@ -24,7 +26,9 @@ static void wifi_event_handler(void *argument, esp_event_base_t base, int32_t id
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retries++ < WIFI_MAX_RETRIES) {
+        if (s_reconfiguring || !s_wifi_started) {
+            return;
+        } else if (s_retries++ < WIFI_MAX_RETRIES) {
             esp_wifi_connect();
         } else {
             xEventGroupSetBits(s_events, WIFI_FAILED_BIT);
@@ -72,7 +76,12 @@ esp_err_t internet_adapter_connect(uint32_t timeout_ms)
     xEventGroupClearBits(s_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
     s_retries = 0;
     err = esp_wifi_set_config(WIFI_IF_STA, &config);
-    if (err == ESP_OK) err = esp_wifi_start();
+    if (err == ESP_OK && !s_wifi_started) {
+        err = esp_wifi_start();
+        if (err == ESP_OK) s_wifi_started = true;
+    } else if (err == ESP_OK) {
+        err = esp_wifi_connect();
+    }
     if (err != ESP_OK) return err;
     const EventBits_t bits = xEventGroupWaitBits(s_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT,
         pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
@@ -100,4 +109,19 @@ esp_err_t internet_adapter_get_status(internet_adapter_status_t *status)
 esp_err_t internet_adapter_disconnect(void)
 {
     return s_started ? esp_wifi_disconnect() : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t internet_adapter_reconnect(uint32_t timeout_ms)
+{
+    if (!s_started) return ESP_ERR_INVALID_STATE;
+    s_reconfiguring = true;
+    if (s_wifi_started) {
+        esp_wifi_disconnect();
+        esp_err_t err = esp_wifi_stop();
+        if (err != ESP_OK) { s_reconfiguring = false; return err; }
+        s_wifi_started = false;
+        s_ipv4_address = 0;
+    }
+    s_reconfiguring = false;
+    return internet_adapter_connect(timeout_ms);
 }

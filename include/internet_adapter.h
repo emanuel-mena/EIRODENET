@@ -40,3 +40,6 @@ esp_err_t internet_adapter_get_status(internet_adapter_status_t *status);
  * @return ESP_OK, ESP_ERR_INVALID_STATE u otro error Wi-Fi.
  */
 esp_err_t internet_adapter_disconnect(void);
+
+/** @brief Detiene y vuelve a iniciar la estación con las credenciales persistentes. */
+esp_err_t internet_adapter_reconnect(uint32_t timeout_ms);
