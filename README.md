@@ -205,6 +205,50 @@ Los comandos son `device.info`, `config.get`, `config.set`, `stream.start`,
 (5 Hz) y `status` (1 Hz). Las respuestas repiten el identificador y contienen
 `ok`, `data` o un objeto `error`; los cambios de calibración llegan como eventos.
 
+## Cliente del sistema de visión
+
+`tools/vision_client.py` consume la telemetría TCP/NDJSON oficial del challenge.
+Si no encuentra un proceso escuchando, inicia el sistema desde el clon configurado
+con su ventana de cámara y abre otro visor que dibuja exactamente las coordenadas
+recibidas. Una franja verde confirma que el mensaje satisface el contrato del clon;
+una roja permite diagnosticar datos antiguos, pero advierte que no deben usarse.
+
+Configure la ruta local en `.env` (use `.env.example` como referencia):
+
+```dotenv
+VISION_CHALLENGE_REPO=C:\ruta\al\Vision-Rover-Challenge
+VISION_HOST=127.0.0.1
+VISION_PORT=2026
+VISION_CAMERA_INDEX=0
+VISION_CAMERA_PROFILE_INDEX=1
+```
+
+Los índices empiezan en cero, igual que los menús del sistema de visión. El índice
+de perfil se resuelve contra los archivos de calibración ordenados y se entrega al
+servidor como el nombre requerido por `--camara`.
+
+Instale y abra el visor desde la raíz de EIRODENET:
+
+```powershell
+python -m venv tools\.venv
+.\tools\.venv\Scripts\Activate.ps1
+python -m pip install -r tools/requirements-gui.txt
+python tools/vision_client.py
+```
+
+Para agentes y pruebas automatizadas, `--count` escribe únicamente NDJSON válido
+en stdout y los diagnósticos en stderr. Sale con código `2` si recibió un mensaje
+que no cumple el contrato y `3` ante un problema de conexión o configuración:
+
+```powershell
+python tools/vision_client.py --count 1
+python tools/vision_client.py --count 20 > .pio\vision-snapshot.ndjson
+```
+
+El servidor iniciado por la herramienta se cierra al salir; `--keep-server` lo
+conserva. Un servidor que ya existía nunca se termina. Para pruebas sin cámara se
+puede agregar `--synthetic`; `--no-start` exige que el servidor ya esté activo.
+
 ## Modelos TinyML
 
 `partitions.csv` reserva una partición `model` de tipo `data`, subtipo `0x40`, offset
