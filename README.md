@@ -79,6 +79,10 @@ ESP_ERROR_CHECK(motor_adapter_set(350, 0));  // Motor 1 al 35 %, Motor 2 detenid
 ESP_ERROR_CHECK(motor_adapter_stop());
 ```
 
+Para comprobar el cableado, `motor_adapter_test_forward()` mueve ambos motores al
+70 % hacia delante durante un segundo y los detiene automáticamente. Mantenga el
+rover suspendido y confirme visualmente que ambas ruedas giren en el sentido correcto.
+
 ## Credenciales y storage
 
 El archivo `.env` de la raíz debe contener:
@@ -150,7 +154,9 @@ Seleccione el puerto de la IdeaBoard y pulse **Conectar**. La contraseña se
 transmite por el enlace USB porque puede leerse de vuelta, pero siempre se muestra
 enmascarada inicialmente; el botón **Mostrar/Ocultar** permite cambiar su
 visibilidad. La pantalla también muestra como dato de solo lectura la MAC Wi-Fi STA
-del propio rover. Al cambiar las credenciales la placa confirma NVS y reconecta la
+del propio rover. La preferencia `WHO_AM_I` identifica persistentemente la placa
+como Rover 10 o Rover 11. Al cambiar las credenciales la placa confirma NVS y
+reconecta la
 estación Wi-Fi sin reiniciar el resto del firmware.
 
 ### Calibración IMU de seis caras
@@ -181,6 +187,7 @@ desalineación y las causas concretas de cualquier rechazo:
 ```text
 python tools/rover_cli.py probe --seconds 4
 python tools/rover_cli.py calibrate
+python tools/rover_cli.py test-motors
 ```
 
 La CLI detecta automáticamente un único adaptador CH340. Si hay varios puertos,
@@ -199,7 +206,7 @@ por `@EIRO `; de este modo los consumidores pueden ignorar los logs ESP-IDF. La
 versión actual es `1`, el límite es 1024 bytes y las peticiones contienen `id`,
 `cmd` y, cuando corresponde, `data` o `face`.
 
-Los comandos son `device.info`, `config.get`, `config.set`, `stream.start`,
+Los comandos son `device.info`, `config.get`, `config.set`, `motors.test_forward`, `stream.start`,
 `stream.stop`, `calibration.start`, `calibration.capture`, `calibration.commit` y
 `calibration.cancel`. La telemetría se divide en los temas `imu` (20 Hz), `sensors`
 (5 Hz) y `status` (1 Hz). Las respuestas repiten el identificador y contienen

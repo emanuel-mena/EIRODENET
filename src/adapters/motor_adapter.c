@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include "board_pins.h"
 #include "driver/ledc.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #define MOTOR_PWM_FREQUENCY_HZ 20000
 #define MOTOR_PWM_MAX_DUTY 1023
@@ -55,3 +57,14 @@ esp_err_t motor_adapter_set(int16_t motor1, int16_t motor2)
 }
 
 esp_err_t motor_adapter_stop(void) { return motor_adapter_set(0, 0); }
+
+esp_err_t motor_adapter_test_forward(void)
+{
+    esp_err_t err = motor_adapter_set(MOTOR_ADAPTER_TEST_COMMAND, MOTOR_ADAPTER_TEST_COMMAND);
+    if (err != ESP_OK) {
+        motor_adapter_stop();
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(MOTOR_ADAPTER_TEST_DURATION_MS));
+    return motor_adapter_stop();
+}

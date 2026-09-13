@@ -8,6 +8,8 @@
 
 /** @brief Magnitud máxima aceptada para cada comando de motor. */
 #define MOTOR_ADAPTER_MAX_COMMAND 1000
+#define MOTOR_ADAPTER_TEST_COMMAND 700
+#define MOTOR_ADAPTER_TEST_DURATION_MS 1000
 
 /**
  * @brief Inicializa los cuatro canales PWM con ambos motores detenidos.
@@ -29,3 +31,10 @@ esp_err_t motor_adapter_set(int16_t motor1, int16_t motor2);
  * @return ESP_OK o un error del periférico LEDC.
  */
 esp_err_t motor_adapter_stop(void);
+
+/**
+ * @brief Mueve ambos motores hacia delante al 70 % durante un segundo y los detiene.
+ * @return ESP_OK o el primer error producido al activar o detener los motores.
+ * @warning Ejecute la prueba con el rover suspendido y las ruedas libres.
+ */
+esp_err_t motor_adapter_test_forward(void);

@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 
 #define APP_NVS_NAMESPACE "app"
+#define WHO_AM_I_KEY "WHO_AM_I"
 #define BOOT_COUNT_KEY "boot_count"
 #define WIFI_SSID_KEY "wifi_ssid"
 #define WIFI_PASSWORD_KEY "wifi_pass"
@@ -143,6 +144,12 @@ static bool valid_peer_mac(const uint8_t mac[6])
     return any && !all_ff && (mac[0] & 1U) == 0;
 }
 
+static bool valid_rover_identity(uint8_t who_am_i)
+{
+    return who_am_i == APP_STORAGE_ROVER_UNCONFIGURED ||
+           who_am_i == APP_STORAGE_ROVER_10 || who_am_i == APP_STORAGE_ROVER_11;
+}
+
 esp_err_t app_storage_get_config(app_storage_config_t *config)
 {
     if (config == NULL) return ESP_ERR_INVALID_ARG;
@@ -150,7 +157,12 @@ esp_err_t app_storage_get_config(app_storage_config_t *config)
     nvs_handle_t handle;
     esp_err_t err = open_storage(NVS_READONLY, &handle);
     if (err != ESP_OK) return err;
-    err = get_optional_string(handle, WIFI_SSID_KEY, config->wifi_ssid, sizeof(config->wifi_ssid));
+    err = nvs_get_u8(handle, WHO_AM_I_KEY, &config->who_am_i);
+    if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    if (err == ESP_OK && !valid_rover_identity(config->who_am_i)) err = ESP_ERR_INVALID_CRC;
+    if (err == ESP_OK) {
+        err = get_optional_string(handle, WIFI_SSID_KEY, config->wifi_ssid, sizeof(config->wifi_ssid));
+    }
     if (err == ESP_OK) err = get_optional_string(handle, WIFI_PASSWORD_KEY, config->wifi_password,
                                                   sizeof(config->wifi_password));
     if (err == ESP_OK) {
@@ -190,7 +202,8 @@ esp_err_t app_storage_get_config(app_storage_config_t *config)
 esp_err_t app_storage_set_config(const app_storage_config_t *config)
 {
     ip4_addr_t address;
-    if (config == NULL || strlen(config->wifi_ssid) > APP_STORAGE_WIFI_SSID_MAX_LENGTH ||
+    if (config == NULL || !valid_rover_identity(config->who_am_i) ||
+        strlen(config->wifi_ssid) > APP_STORAGE_WIFI_SSID_MAX_LENGTH ||
         strlen(config->wifi_password) > APP_STORAGE_WIFI_PASSWORD_MAX_LENGTH ||
         (config->server_configured &&
          (config->server_port == 0 || !ip4addr_aton(config->server_ipv4, &address))) ||
@@ -200,7 +213,13 @@ esp_err_t app_storage_set_config(const app_storage_config_t *config)
     nvs_handle_t handle;
     esp_err_t err = open_storage(NVS_READWRITE, &handle);
     if (err != ESP_OK) return err;
-    err = nvs_set_str(handle, WIFI_SSID_KEY, config->wifi_ssid);
+    if (config->who_am_i == APP_STORAGE_ROVER_UNCONFIGURED) {
+        err = nvs_erase_key(handle, WHO_AM_I_KEY);
+        if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    } else {
+        err = nvs_set_u8(handle, WHO_AM_I_KEY, config->who_am_i);
+    }
+    if (err == ESP_OK) err = nvs_set_str(handle, WIFI_SSID_KEY, config->wifi_ssid);
     if (err == ESP_OK) err = nvs_set_str(handle, WIFI_PASSWORD_KEY, config->wifi_password);
     if (err == ESP_OK && config->server_configured) {
         err = nvs_set_str(handle, SERVER_IP_KEY, config->server_ipv4);

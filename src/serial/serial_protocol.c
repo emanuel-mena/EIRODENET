@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/ip4_addr.h"
+#include "motor_adapter.h"
 #include "rover_service.h"
 
 #define PROTOCOL_PREFIX "@EIRO "
@@ -22,6 +23,16 @@
 static const char *TAG = "serial_protocol";
 static bool s_streaming;
 static uint32_t s_sequence;
+static TaskHandle_t s_motor_test_task;
+
+static void motor_test_task(void *argument)
+{
+    (void)argument;
+    const esp_err_t err = motor_adapter_test_forward();
+    if (err != ESP_OK) ESP_LOGE(TAG, "Prueba de motores: %s", esp_err_to_name(err));
+    s_motor_test_task = NULL;
+    vTaskDelete(NULL);
+}
 
 static void transmit_json(cJSON *message)
 {
@@ -95,6 +106,7 @@ static void handle_config_get(double id)
     esp_err_t err = app_storage_get_config(&config);
     if (err != ESP_OK) { respond_error(id, "storage_error", err); return; }
     cJSON *data = cJSON_CreateObject();
+    cJSON_AddNumberToObject(data, "who_am_i", config.who_am_i);
     cJSON_AddStringToObject(data, "wifi_ssid", config.wifi_ssid);
     cJSON_AddStringToObject(data, "wifi_password", config.wifi_password);
     cJSON_AddStringToObject(data, "server_ipv4", config.server_configured ? config.server_ipv4 : "");
@@ -111,12 +123,13 @@ static void handle_config_set(double id, const cJSON *request)
 {
     static const char *const root_allowed[] = {"v", "id", "cmd", "data"};
     static const char *const data_allowed[] = {
-        "wifi_ssid", "wifi_password", "server_ipv4", "server_port", "peer_mac"};
+        "who_am_i", "wifi_ssid", "wifi_password", "server_ipv4", "server_port", "peer_mac"};
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(request, "data");
     if (!has_only(request, root_allowed, 4) || !cJSON_IsObject(data) ||
-        !has_only(data, data_allowed, 5)) {
+        !has_only(data, data_allowed, 6)) {
         respond_error(id, "invalid_fields", ESP_ERR_INVALID_ARG); return;
     }
+    const cJSON *who_am_i = cJSON_GetObjectItemCaseSensitive(data, "who_am_i");
     const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(data, "wifi_ssid");
     const cJSON *password = cJSON_GetObjectItemCaseSensitive(data, "wifi_password");
     const cJSON *server = cJSON_GetObjectItemCaseSensitive(data, "server_ipv4");
@@ -126,7 +139,19 @@ static void handle_config_set(double id, const cJSON *request)
         !cJSON_IsNumber(port) || port->valuedouble != port->valueint || !cJSON_IsString(peer)) {
         respond_error(id, "invalid_config", ESP_ERR_INVALID_ARG); return;
     }
-    app_storage_config_t config = {0};
+    if (who_am_i != NULL && (!cJSON_IsNumber(who_am_i) ||
+        who_am_i->valuedouble != who_am_i->valueint ||
+        (who_am_i->valueint != APP_STORAGE_ROVER_UNCONFIGURED &&
+         who_am_i->valueint != APP_STORAGE_ROVER_10 &&
+         who_am_i->valueint != APP_STORAGE_ROVER_11))) {
+        respond_error(id, "invalid_config", ESP_ERR_INVALID_ARG); return;
+    }
+    app_storage_config_t config;
+    esp_err_t err = app_storage_get_config(&config);
+    if (err != ESP_OK) { respond_error(id, "storage_error", err); return; }
+    const uint8_t stored_identity = config.who_am_i;
+    memset(&config, 0, sizeof(config));
+    config.who_am_i = who_am_i != NULL ? (uint8_t)who_am_i->valueint : stored_identity;
     if (strlen(ssid->valuestring) > APP_STORAGE_WIFI_SSID_MAX_LENGTH ||
         strlen(password->valuestring) > APP_STORAGE_WIFI_PASSWORD_MAX_LENGTH ||
         strlen(server->valuestring) > APP_STORAGE_IPV4_MAX_LENGTH) {
@@ -151,7 +176,7 @@ static void handle_config_set(double id, const cJSON *request)
         }
     }
     bool reconnecting = false;
-    esp_err_t err = rover_service_set_config(&config, &reconnecting);
+    err = rover_service_set_config(&config, &reconnecting);
     if (err != ESP_OK) { respond_error(id, "invalid_config", err); return; }
     cJSON *result = cJSON_CreateObject();
     cJSON_AddBoolToObject(result, "wifi_reconnecting", reconnecting);
@@ -201,6 +226,17 @@ static void handle_request(cJSON *root)
         respond_ok(id, data);
     } else if (strcmp(cmd->valuestring, "config.get") == 0) {
         handle_config_get(id);
+    } else if (strcmp(cmd->valuestring, "motors.test_forward") == 0) {
+        if (s_motor_test_task != NULL) {
+            respond_error(id, "motor_busy", ESP_ERR_INVALID_STATE);
+        } else if (xTaskCreate(motor_test_task, "motor_test", 2048, NULL, 4,
+                               &s_motor_test_task) == pdPASS) {
+            cJSON *data = cJSON_CreateObject();
+            cJSON_AddNumberToObject(data, "duration_ms", MOTOR_ADAPTER_TEST_DURATION_MS);
+            respond_ok(id, data);
+        } else {
+            respond_error(id, "motor_error", ESP_ERR_NO_MEM);
+        }
     } else if (strcmp(cmd->valuestring, "stream.start") == 0) {
         s_streaming = true; respond_ok(id, NULL);
     } else if (strcmp(cmd->valuestring, "stream.stop") == 0) {

@@ -150,6 +150,10 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Parámetros persistentes"); form = QFormLayout(box)
         self.rover_mac = QLineEdit(); self.rover_mac.setReadOnly(True)
         self.rover_mac.setPlaceholderText("Se obtiene al conectar la placa")
+        self.who_am_i = QComboBox()
+        self.who_am_i.addItem("Sin configurar", 0)
+        self.who_am_i.addItem("Rover 10", 10)
+        self.who_am_i.addItem("Rover 11", 11)
         self.ssid = QLineEdit(); self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)
         password_row = QWidget(); password_layout = QHBoxLayout(password_row)
@@ -165,6 +169,7 @@ class MainWindow(QMainWindow):
         self.server_port.setPlaceholderText("5000")
         self.peer_mac.setPlaceholderText("AA:BB:CC:DD:EE:FF")
         form.addRow("MAC de este rover", self.rover_mac)
+        form.addRow("WHO_AM_I", self.who_am_i)
         form.addRow("SSID", self.ssid); form.addRow("Contraseña", password_row)
         form.addRow("IPv4 del servidor", self.server_ip); form.addRow("Puerto", self.server_port)
         form.addRow("MAC del compañero", self.peer_mac)
@@ -174,6 +179,13 @@ class MainWindow(QMainWindow):
         save = QPushButton("Guardar y aplicar"); save.clicked.connect(self.save_configuration)
         buttons.addWidget(load); buttons.addWidget(save); buttons.addStretch()
         layout.addLayout(buttons)
+        motor_test = QPushButton("Probar ambos motores hacia delante (1 s)")
+        motor_test.clicked.connect(lambda: self.send_command("motors.test_forward"))
+        layout.addWidget(motor_test)
+        motor_warning = QLabel("⚠ Mantenga el rover suspendido y las ruedas libres durante la prueba.")
+        motor_warning.setWordWrap(True)
+        motor_warning.setStyleSheet("color: #b45309; font-weight: 600")
+        layout.addWidget(motor_warning)
         self.config_status = QLabel("")
         layout.addWidget(self.config_status); layout.addStretch()
         return page
@@ -298,6 +310,7 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "Configuración inválida", str(exc)); return
         self.send_command("config.set", data={
+            "who_am_i": self.who_am_i.currentData(),
             "wifi_ssid": self.ssid.text(), "wifi_password": self.password.text(),
             "server_ipv4": server, "server_port": port, "peer_mac": peer})
 
@@ -323,6 +336,8 @@ class MainWindow(QMainWindow):
         if command == "device.info":
             self.rover_mac.setText(data.get("rover_mac", ""))
         elif command == "config.get":
+            rover_index = self.who_am_i.findData(data.get("who_am_i", 0))
+            self.who_am_i.setCurrentIndex(max(rover_index, 0))
             self.ssid.setText(data.get("wifi_ssid", ""))
             self.password.setText(data.get("wifi_password", ""))
             self.server_ip.setText(data.get("server_ipv4", ""))
@@ -333,6 +348,10 @@ class MainWindow(QMainWindow):
             text = "Configuración guardada"
             if data.get("wifi_reconnecting"): text += "; reconectando Wi-Fi…"
             self.config_status.setText(text)
+        elif command == "motors.test_forward":
+            duration = int(data.get("duration_ms", 1000)) / 1000
+            self.config_status.setText(
+                f"Prueba iniciada por {duration:g} s; los motores se detendrán automáticamente")
         self.statusBar().showMessage(f"{command}: correcto", 3000)
 
     @staticmethod

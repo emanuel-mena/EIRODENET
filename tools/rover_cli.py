@@ -134,7 +134,8 @@ def probe(client: RoverSerial, seconds: float) -> int:
     accel, gyro = [], []
     calibrated = False
     for message in client.messages(seconds):
-        if message.get("type") == "telemetry" and message.get("topic") == "imu" and message.get("valid"):
+        if (message.get("type") == "telemetry" and message.get("topic") == "imu" and
+                message.get("valid") and "accel_g" in message and "gyro_dps" in message):
             accel.append(message["accel_g"]); gyro.append(message["gyro_dps"])
             calibrated = bool(message.get("calibrated"))
     if not accel:
@@ -149,6 +150,57 @@ def probe(client: RoverSerial, seconds: float) -> int:
     return 0
 
 
+def collect_imu(client: RoverSerial, seconds: float) -> tuple[list[list[float]], list[list[float]]]:
+    accel, gyro = [], []
+    for message in client.messages(seconds):
+        if (message.get("type") == "telemetry" and message.get("topic") == "imu" and
+                message.get("valid") and "accel_g" in message and "gyro_dps" in message):
+            accel.append(message["accel_g"])
+            gyro.append(message["gyro_dps"])
+    if not accel:
+        raise RuntimeError("No se recibieron muestras válidas del IMU")
+    return accel, gyro
+
+
+def deviation_norm(row: list[float], mean: list[float]) -> float:
+    return math.sqrt(sum((float(row[axis]) - mean[axis]) ** 2 for axis in range(3)))
+
+
+def axis_peaks(rows: list[list[float]], mean: list[float]) -> list[float]:
+    return [max(abs(float(row[axis]) - mean[axis]) for row in rows) for axis in range(3)]
+
+
+def test_motors(client: RoverSerial) -> int:
+    client.request("stream.start")
+    print("Midiendo referencia con el rover estacionario...")
+    base_accel, base_gyro = collect_imu(client, 1.5)
+    accel_mean = [statistics.fmean(row[axis] for row in base_accel) for axis in range(3)]
+    gyro_mean = [statistics.fmean(row[axis] for row in base_gyro) for axis in range(3)]
+    base_accel_peak = max(deviation_norm(row, accel_mean) for row in base_accel)
+    base_gyro_peak = max(deviation_norm(row, gyro_mean) for row in base_gyro)
+
+    print("Activando ambos motores al 70 % durante 1 segundo...")
+    response = client.request("motors.test_forward")
+    duration = max(float(response.get("duration_ms", 1000)) / 1000.0, 1.0)
+    moving_accel, moving_gyro = collect_imu(client, duration + 0.5)
+    moving_accel_peak = max(deviation_norm(row, accel_mean) for row in moving_accel)
+    moving_gyro_peak = max(deviation_norm(row, gyro_mean) for row in moving_gyro)
+    moving_accel_axes = axis_peaks(moving_accel, accel_mean)
+    moving_gyro_axes = axis_peaks(moving_gyro, gyro_mean)
+    accel_detected = moving_accel_peak > max(0.02, base_accel_peak * 3.0)
+    gyro_detected = moving_gyro_peak > max(2.0, base_gyro_peak * 3.0)
+
+    print(f"Ruido en reposo: accel={base_accel_peak:.4f} g, gyro={base_gyro_peak:.3f} dps")
+    print(f"Pico en prueba : accel={moving_accel_peak:.4f} g, gyro={moving_gyro_peak:.3f} dps")
+    print(f"Picos por eje  : accel={vector(moving_accel_axes)} g")
+    print(f"                 gyro={vector(moving_gyro_axes)} dps")
+    if accel_detected or gyro_detected:
+        print("RESULTADO: el IMU detectó movimiento durante la activación de los motores.")
+        return 0
+    print("RESULTADO: no se detectó movimiento por encima del ruido de reposo.")
+    return 1
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -157,6 +209,7 @@ def main() -> int:
     parser.add_argument("--port", help="Puerto serie; si se omite se detecta automáticamente el CH340")
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("calibrate", help="Ejecuta el asistente interactivo de seis caras")
+    subparsers.add_parser("test-motors", help="Activa ambos motores y comprueba movimiento con el IMU")
     probe_parser = subparsers.add_parser("probe", help="Resume las lecturas actuales del IMU")
     probe_parser.add_argument("--seconds", type=float, default=4.0)
     args = parser.parse_args()
@@ -164,7 +217,9 @@ def main() -> int:
     client = RoverSerial(port_name)
     print(f"Puerto: {port_name}")
     try:
-        return calibrate(client) if args.action == "calibrate" else probe(client, args.seconds)
+        if args.action == "calibrate": return calibrate(client)
+        if args.action == "test-motors": return test_motors(client)
+        return probe(client, args.seconds)
     except KeyboardInterrupt:
         print("\nCancelado.")
         return 130
