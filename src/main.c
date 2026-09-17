@@ -11,6 +11,7 @@
 #include "peer_comms_service.h"
 #include "rover_service.h"
 #include "serial_protocol.h"
+#include "vision_service.h"
 
 static const char *TAG = "rover";
 
@@ -53,16 +54,17 @@ void app_main(void)
     }
     err = app_mode_start(config.who_am_i);
     ESP_LOGI(TAG, "Selector de modo: %s", esp_err_to_name(err));
-    err = navigation_service_start();
-    ESP_LOGI(TAG, "Navegacion en core 1: %s", esp_err_to_name(err));
-    err = manual_control_service_start();
-    ESP_LOGI(TAG, "Control manual seguro: %s", esp_err_to_name(err));
-    err = competition_service_start();
-    ESP_LOGI(TAG, "Competencia: %s", esp_err_to_name(err));
-
     err = rover_service_start();
     ESP_LOGI(TAG, "Servicios del rover: %s", esp_err_to_name(err));
     if (err == ESP_OK) {
+        err = vision_service_start();
+        ESP_LOGI(TAG, "Cliente de vision v2: %s", esp_err_to_name(err));
+        err = navigation_service_start();
+        ESP_LOGI(TAG, "Navegacion en core 1: %s", esp_err_to_name(err));
+        err = manual_control_service_start();
+        ESP_LOGI(TAG, "Control manual seguro: %s", esp_err_to_name(err));
+        err = competition_service_start();
+        ESP_LOGI(TAG, "Competencia: %s", esp_err_to_name(err));
         const esp_err_t peer_err = peer_comms_service_start();
         ESP_LOGI(TAG, "Enlace ESP-NOW: %s", esp_err_to_name(peer_err));
         err = serial_protocol_start();

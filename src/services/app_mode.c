@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "led_strip.h"
 #include "motor_adapter.h"
+#include "navigation_service.h"
 
 #define MODE_TASK_PERIOD_MS 20
 #define BUTTON_DEBOUNCE_TICKS 3
@@ -39,6 +40,7 @@ static void toggle_mode(void)
     s_mode = s_mode == APP_MODE_TEST ? APP_MODE_COMPETITION : APP_MODE_TEST;
     const app_mode_t mode = s_mode;
     taskEXIT_CRITICAL(&s_mode_lock);
+    navigation_service_cancel(NAVIGATION_CANCEL_MODE);
     motor_adapter_stop();
     ESP_LOGW(TAG, "Modo cambiado con BOOT: %s", app_mode_name(mode));
 }

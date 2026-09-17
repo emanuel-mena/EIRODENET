@@ -43,5 +43,5 @@ void peer_comms_service_get_status(peer_comms_status_t *status);
 /** Envía un comando manual al compañero, sólo si existe enlace reciente. */
 esp_err_t peer_comms_service_send_drive(int16_t left, int16_t right);
 
-/** Envía un objetivo en celdas al stub de navegación del compañero. */
+/** Envía un objetivo en celdas a la navegación de prueba del compañero. */
 esp_err_t peer_comms_service_send_target(float col, float row);

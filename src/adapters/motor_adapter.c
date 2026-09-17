@@ -19,7 +19,9 @@ static esp_err_t set_channel(ledc_channel_t channel, uint32_t duty)
 static esp_err_t set_one_motor(int16_t command, ledc_channel_t forward, ledc_channel_t reverse)
 {
     if (command < -MOTOR_ADAPTER_MAX_COMMAND || command > MOTOR_ADAPTER_MAX_COMMAND) return ESP_ERR_INVALID_ARG;
-    const uint32_t duty = (uint32_t)abs(command) * MOTOR_PWM_MAX_DUTY / MOTOR_ADAPTER_MAX_COMMAND;
+    int magnitude = abs(command);
+    if (magnitude > 0 && magnitude < MOTOR_ADAPTER_MIN_COMMAND) magnitude = MOTOR_ADAPTER_MIN_COMMAND;
+    const uint32_t duty = (uint32_t)magnitude * MOTOR_PWM_MAX_DUTY / MOTOR_ADAPTER_MAX_COMMAND;
     esp_err_t err = set_channel(forward, 0);
     if (err == ESP_OK) err = set_channel(reverse, 0);
     if (err != ESP_OK || command == 0) return err;

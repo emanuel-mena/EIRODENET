@@ -8,6 +8,7 @@
 
 /** @brief Magnitud máxima aceptada para cada comando de motor. */
 #define MOTOR_ADAPTER_MAX_COMMAND 1000
+#define MOTOR_ADAPTER_MIN_COMMAND 700
 #define MOTOR_ADAPTER_TEST_COMMAND 700
 #define MOTOR_ADAPTER_TEST_DURATION_MS 1000
 

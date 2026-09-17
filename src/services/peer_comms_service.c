@@ -18,7 +18,7 @@
 #include "rover_service.h"
 
 #define PEER_MAGIC 0x524f4952U
-#define PEER_PROTOCOL_VERSION 1U
+#define PEER_PROTOCOL_VERSION 2U
 #define PEER_STATE_PERIOD_MS 200U
 #define PEER_TIMEOUT_MS 1500U
 

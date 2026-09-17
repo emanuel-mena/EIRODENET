@@ -35,11 +35,11 @@ function roverCard(id) {
       <section class="controls"><div><p class="section-label">CONTROL DIRECTO</p><div class="dpad">
         <button data-drive="forward" aria-label="Avanzar">↑</button><button data-drive="left" aria-label="Girar izquierda">←</button><button data-drive="stop" class="stop" aria-label="Detener">■</button><button data-drive="right" aria-label="Girar derecha">→</button><button data-drive="back" aria-label="Retroceder">↓</button>
       </div><small class="hint">Mantén presionado · parada automática en 500 ms</small></div>
-      <form class="target-form"><p class="section-label">OBJETIVO DE NAVEGACIÓN</p><div><label>Col <input name="col" type="number" min="0" step="0.1" required></label><label>Fila <input name="row" type="number" min="0" step="0.1" required></label></div><button type="submit">Enviar al núcleo 1</button><small class="nav-state">Stub listo · sin movimiento</small></form></section>
+      <form class="target-form"><p class="section-label">OBJETIVO DE NAVEGACIÓN</p><div><label>Col <input name="col" type="number" min="0" step="0.1" required></label><label>Fila <input name="row" type="number" min="0" step="0.1" required></label></div><button type="submit">Navegar al punto</button><button type="button" class="cancel-navigation">Cancelar y detener</button><small class="nav-state">Esperando pose de visión</small><div class="nav-telemetry"><span data-nav="pose">Pose —</span><span data-nav="speed">Velocidad —</span><span data-nav="vision">Visión —</span><span data-nav="grid">Cuadrícula —</span></div></form></section>
     </fieldset></article>`
 }
 
-const driveCommands = { forward: [600, 600], back: [-600, -600], left: [-450, 450], right: [450, -450], stop: [0, 0] }
+const driveCommands = { forward: [700, 700], back: [-700, -700], left: [-700, 700], right: [700, -700], stop: [0, 0] }
 const rovers = new Map()
 for (const id of roverIds) {
   const element = document.querySelector(`#rover-${id}`)
@@ -47,6 +47,7 @@ for (const id of roverIds) {
   state.orientation = makeOrientation(element.querySelector('.arrow'), id)
   rovers.set(id, state)
   element.querySelector('.target-form').addEventListener('submit', event => sendTarget(event, state))
+  element.querySelector('.cancel-navigation').addEventListener('click', () => cancelNavigation(state))
   for (const button of element.querySelectorAll('[data-drive]')) bindDrive(button, state)
 }
 
@@ -84,6 +85,7 @@ function clearTelemetry(rover) {
   e.querySelector('.mode-pill').textContent = '—'; e.querySelector('.ip').textContent = 'Sin IP'; e.querySelector('.rssi').textContent = '— dBm'
   e.querySelector('.temperature').textContent = '— °C'; e.querySelector('.imu-state').textContent = 'Esperando lectura'
   setText(e, 'distance', '—'); setText(e, 'ir-front', '— / —'); setText(e, 'ir-rear', '— / —'); setText(e, 'color', '— / — / —')
+  for (const key of ['pose', 'speed', 'vision', 'grid']) e.querySelector(`[data-nav="${key}"]`).textContent = `${key} —`
   rover.orientation.quaternion.identity()
 }
 
@@ -116,7 +118,14 @@ function updateRover(rover, data) {
   setText(e, 'ir-rear', data.sensors.infrared.valid ? `${data.sensors.infrared.rear_left} / ${data.sensors.infrared.rear_right}` : '— / —')
   setText(e, 'color', data.sensors.color.valid ? `${data.sensors.color.red} / ${data.sensors.color.green} / ${data.sensors.color.blue}` : '— / — / —')
   e.querySelectorAll('.controls button, .controls input').forEach(control => { control.disabled = competition })
-  e.querySelector('.nav-state').textContent = data.navigation.has_target ? `Stub #${data.navigation.request_id}: (${data.navigation.col.toFixed(1)}, ${data.navigation.row.toFixed(1)}) · core ${data.navigation.core}` : `Stub listo · core ${data.navigation.core} · sin movimiento`
+  const nav = data.navigation; const pose = nav.pose || {}; const vision = nav.vision || {}; const grid = nav.grid_encoder || {}
+  e.querySelector('.nav-state').textContent = nav.has_target
+    ? `${nav.phase_name} #${nav.request_id} → (${nav.col.toFixed(1)}, ${nav.row.toFixed(1)})`
+    : `${nav.phase_name || 'idle'} · error ${nav.error || 0}`
+  e.querySelector('[data-nav="pose"]').textContent = pose.valid ? `Pose ${pose.col.toFixed(2)}, ${pose.row.toFixed(2)} · ${pose.theta_deg.toFixed(1)}°` : 'Pose no inicializada'
+  e.querySelector('[data-nav="speed"]').textContent = pose.valid ? `v ${pose.speed_cells_s.toFixed(2)} cel/s · ±${pose.uncertainty_cells.toFixed(2)} cel` : 'Velocidad —'
+  e.querySelector('[data-nav="vision"]').textContent = vision.fresh ? `Visión fresca · ${vision.age_ms} ms` : (vision.connected ? 'Visión sin pose fresca' : 'Visión desconectada · local')
+  e.querySelector('[data-nav="grid"]').textContent = grid.calibrated ? `Grid 0b${Number(grid.pattern).toString(2).padStart(4, '0')} · listo` : `Grid calibrando · máscara 0x${Number(grid.calibrated_mask || 0).toString(16)}`
 }
 function setText(element, sensor, value) { element.querySelector(`[data-sensor="${sensor}"]`).textContent = value }
 
@@ -134,7 +143,12 @@ async function sendTarget(event, rover) {
   const result = await post(rover, '/navigation/target', { col: Number(form.get('col')), row: Number(form.get('row')) })
   if (result) notify(result.transport === 'esp-now'
     ? `Rover ${rover.id}: objetivo enviado por ESP-NOW`
-    : `Rover ${rover.id}: objetivo #${result.request_id} recibido por el stub`)
+    : `Rover ${rover.id}: navegación #${result.request_id} iniciada`)
+}
+async function cancelNavigation(rover) {
+  const peer = rover.base?.endsWith('/peer')
+  const result = await post(rover, peer ? '/drive' : '/navigation/cancel', peer ? { left: 0, right: 0 } : {})
+  if (result) notify(`Rover ${rover.id}: navegación cancelada y motores detenidos`)
 }
 async function post(rover, path, body, announceErrors = true) {
   if (!rover.online) { if (announceErrors) notify(`Rover ${rover.id} está desconectado; comando bloqueado`); return null }

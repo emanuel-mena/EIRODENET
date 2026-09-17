@@ -65,7 +65,7 @@ resistencias pull-up/pull-down internas.
 | Servicios | `rover_service.h` | Muestreo concurrente, calibración y fusión de orientación |
 | Serial | `serial_protocol.h` | Configuración y telemetría NDJSON sobre UART0 |
 | Modos | `app_mode.h` | Cambio con BOOT e indicador NeoPixel de prueba/competencia |
-| Navegación | `navigation_service.h` | Cola de objetivos y stub fijado al núcleo 1 |
+| Navegación | `navigation_service.h` | Fusión visión/IMU/cuadrícula y control punto a punto en núcleo 1 |
 | Control manual | `manual_control_service.h` | Comandos web con parada de seguridad a 500 ms |
 | Competencia | `competition_service.h` | Punto de extensión del algoritmo autónomo v2 |
 | Comunicación par | `peer_comms_service.h` | Telemetría y comandos entre rovers mediante ESP-NOW |
@@ -79,10 +79,12 @@ valores de retorno, unidades y precondiciones.
 `-1000` y `1000`. El signo selecciona el sentido, la magnitud controla el ciclo PWM
 y cero deja el motor en rueda libre. Antes de invertir un motor, el adapter lleva
 ambas entradas del puente H a cero para evitar conducción cruzada.
+Todo comando no nulo inferior a `700` se eleva automáticamente a `700`, porque el
+rover necesita al menos 70 % de PWM para vencer la fricción estática.
 
 ```c
 ESP_ERROR_CHECK(motor_adapter_init());
-ESP_ERROR_CHECK(motor_adapter_set(350, 0));  // Motor 1 al 35 %, Motor 2 detenido.
+ESP_ERROR_CHECK(motor_adapter_set(700, 0));  // Motor 1 al 70 %, Motor 2 detenido.
 ESP_ERROR_CHECK(motor_adapter_stop());
 ```
 
@@ -284,18 +286,25 @@ el panel del compañero se marca desconectado y bloquea telemetría y comandos. 
 eso se puede abrir, por ejemplo, `http://cecilio.local` y operar ambos paneles sin
 que el navegador conozca la URL o IP del segundo rover.
 
-En modo prueba la web muestra IMU, sensores, red y una flecha 3D de Three.js,
-permite control diferencial directo y acepta objetivos `(col, row)` para el stub de
-navegación. Los comandos destinados al compañero atraviesan ESP-NOW y se validan
+En modo prueba la web muestra IMU, sensores, red, la pose fusionada y una flecha 3D
+de Three.js. Permite control diferencial directo y acepta objetivos `(col, row)`
+para navegación punto a punto. Los comandos destinados al compañero atraviesan ESP-NOW y se validan
 otra vez en el rover receptor. En modo competencia los controles manuales quedan
 deshabilitados.
+
+La navegación exige primero una pose v2 fresca del servidor configurado. Después
+predice a 100 Hz con el giroscopio y usa los cuatro TCRT5000 como encoder sobre la
+cuadrícula de 20 mm; aprende automáticamente los dos niveles de cada sensor y su
+polaridad. Patrones ambiguos no corrigen la pose. Si cae la visión continúa de forma
+local y publica incertidumbre; un obstáculo ultrasónico a 150 mm, un fallo de IMU/IR,
+un cambio de modo o un mando manual detienen y cancelan el movimiento. Se puede
+detener explícitamente con `POST /api/v1/navigation/cancel`.
 
 El firmware siempre inicia en modo prueba. Una pulsación de BOOT alterna entre
 prueba y competencia y detiene los motores. GPIO2 pulsa en azul durante prueba; en
 competencia queda amarillo para Rover 10 y morado para Rover 11. Una identidad sin
-configurar se señala en rojo. El algoritmo de competencia y la ejecución de rutas
-son stubs explícitos en esta iteración: reciben estado u objetivos, pero no generan
-movimiento autónomo.
+configurar se señala en rojo. El algoritmo de competencia sigue siendo un stub y no
+genera movimiento autónomo; el controlador punto a punto sólo se habilita en prueba.
 
 ## Estructura del repositorio
 

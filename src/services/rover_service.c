@@ -13,9 +13,11 @@
 #include "infrared_adapter.h"
 #include "local_site_service.h"
 #include "ultrasonic_adapter.h"
+#include "vision_service.h"
 
 #define IMU_PERIOD_MS 10
 #define ENVIRONMENT_PERIOD_MS 200
+#define INFRARED_PERIOD_MS 10
 #define CALIBRATION_SAMPLES 200
 #define CALIBRATION_SETTLING_SAMPLES 50
 #define CAL_ACCEL_STDDEV_MAX_G 0.05f
@@ -203,16 +205,36 @@ static void environment_task(void *argument)
         next.ultrasonic_error = s_ultrasonic_ready
             ? ultrasonic_adapter_read_mm(&next.distance_mm) : ESP_ERR_INVALID_STATE;
         next.ultrasonic_valid = next.ultrasonic_error == ESP_OK;
-        next.infrared_error = s_infrared_ready
-            ? infrared_adapter_read(&next.infrared) : ESP_ERR_INVALID_STATE;
-        next.infrared_valid = next.infrared_error == ESP_OK;
         next.color_error = s_color_ready
             ? color_sensor_adapter_read(&next.color) : ESP_ERR_INVALID_STATE;
         next.color_valid = next.color_error == ESP_OK;
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        s_sensors = next;
+        s_sensors.timestamp_ms = next.timestamp_ms;
+        s_sensors.ultrasonic_valid = next.ultrasonic_valid;
+        s_sensors.ultrasonic_error = next.ultrasonic_error;
+        s_sensors.distance_mm = next.distance_mm;
+        s_sensors.color_valid = next.color_valid;
+        s_sensors.color_error = next.color_error;
+        s_sensors.color = next.color;
         xSemaphoreGive(s_lock);
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(ENVIRONMENT_PERIOD_MS));
+    }
+}
+
+static void infrared_task(void *argument)
+{
+    (void)argument;
+    TickType_t wake = xTaskGetTickCount();
+    while (true) {
+        infrared_adapter_state_t infrared = {0};
+        const esp_err_t err = s_infrared_ready
+            ? infrared_adapter_read(&infrared) : ESP_ERR_INVALID_STATE;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_sensors.infrared_error = err;
+        s_sensors.infrared_valid = err == ESP_OK;
+        if (err == ESP_OK) s_sensors.infrared = infrared;
+        xSemaphoreGive(s_lock);
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(INFRARED_PERIOD_MS));
     }
 }
 
@@ -267,6 +289,7 @@ esp_err_t rover_service_start(void)
         }
     }
     if (xTaskCreate(imu_task, "imu_100hz", 4096, NULL, 6, NULL) != pdPASS ||
+        xTaskCreate(infrared_task, "infrared_100hz", 3072, NULL, 5, NULL) != pdPASS ||
         xTaskCreate(environment_task, "sensors_5hz", 4096, NULL, 3, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
@@ -311,6 +334,7 @@ esp_err_t rover_service_set_config(const app_storage_config_t *config, bool *wif
                          strcmp(previous.wifi_password, config->wifi_password) != 0;
     err = app_storage_set_config(config);
     if (err != ESP_OK) return err;
+    vision_service_reload();
     *wifi_reconnecting = false;
     if (strcmp(previous.local_site, config->local_site) != 0) {
         err = local_site_service_set_hostname(config->local_site);

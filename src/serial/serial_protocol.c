@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "lwip/ip4_addr.h"
 #include "motor_adapter.h"
+#include "navigation_service.h"
 #include "rover_service.h"
 
 #define PROTOCOL_PREFIX "@EIRO "
@@ -28,6 +29,7 @@ static TaskHandle_t s_motor_test_task;
 static void motor_test_task(void *argument)
 {
     (void)argument;
+    navigation_service_cancel(NAVIGATION_CANCEL_MANUAL);
     const esp_err_t err = motor_adapter_test_forward();
     if (err != ESP_OK) ESP_LOGE(TAG, "Prueba de motores: %s", esp_err_to_name(err));
     s_motor_test_task = NULL;

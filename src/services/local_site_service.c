@@ -71,6 +71,21 @@ static void add_vec3(cJSON *parent, const char *name, const float values[3])
     }
 }
 
+static const char *navigation_phase_name(navigation_phase_t phase)
+{
+    switch (phase) {
+        case NAVIGATION_IDLE: return "idle";
+        case NAVIGATION_WAITING_FOR_POSE: return "waiting_for_pose";
+        case NAVIGATION_TURNING: return "turning";
+        case NAVIGATION_DRIVING: return "driving";
+        case NAVIGATION_ARRIVED: return "arrived";
+        case NAVIGATION_BLOCKED: return "blocked";
+        case NAVIGATION_CANCELLED: return "cancelled";
+        case NAVIGATION_ERROR: return "error";
+        default: return "unknown";
+    }
+}
+
 static esp_err_t state_handler(httpd_req_t *request)
 {
     rover_imu_state_t imu = {0};
@@ -138,12 +153,39 @@ static esp_err_t state_handler(httpd_req_t *request)
 
     cJSON *nav_json = cJSON_AddObjectToObject(root, "navigation");
     cJSON_AddNumberToObject(nav_json, "phase", navigation.phase);
-    cJSON_AddStringToObject(nav_json, "implementation", "stub");
+    cJSON_AddStringToObject(nav_json, "phase_name", navigation_phase_name(navigation.phase));
+    cJSON_AddStringToObject(nav_json, "implementation", "fused-grid-v1");
     cJSON_AddNumberToObject(nav_json, "core", navigation.core_id);
     cJSON_AddBoolToObject(nav_json, "has_target", navigation.has_target);
     cJSON_AddNumberToObject(nav_json, "col", navigation.col);
     cJSON_AddNumberToObject(nav_json, "row", navigation.row);
     cJSON_AddNumberToObject(nav_json, "request_id", navigation.request_id);
+    cJSON_AddNumberToObject(nav_json, "error", navigation.error);
+    cJSON_AddNumberToObject(nav_json, "cancel_reason", navigation.cancel_reason);
+    cJSON *pose_json = cJSON_AddObjectToObject(nav_json, "pose");
+    cJSON_AddBoolToObject(pose_json, "valid", navigation.pose_valid);
+    cJSON_AddNumberToObject(pose_json, "col", navigation.pose_col);
+    cJSON_AddNumberToObject(pose_json, "row", navigation.pose_row);
+    cJSON_AddNumberToObject(pose_json, "theta_deg", navigation.theta_deg);
+    cJSON_AddNumberToObject(pose_json, "speed_cells_s", navigation.linear_speed_cells_s);
+    cJSON_AddNumberToObject(pose_json, "angular_speed_dps", navigation.angular_speed_dps);
+    cJSON_AddNumberToObject(pose_json, "uncertainty_cells", navigation.uncertainty_cells);
+    cJSON_AddNumberToObject(pose_json, "vision_heading_offset_deg",
+                            navigation.vision_heading_offset_deg);
+    cJSON *vision_json = cJSON_AddObjectToObject(nav_json, "vision");
+    cJSON_AddBoolToObject(vision_json, "configured", navigation.vision_configured);
+    cJSON_AddBoolToObject(vision_json, "connected", navigation.vision_connected);
+    cJSON_AddBoolToObject(vision_json, "fresh", navigation.vision_fresh);
+    cJSON_AddNumberToObject(vision_json, "age_ms", navigation.vision_age_ms);
+    cJSON *grid_json = cJSON_AddObjectToObject(nav_json, "grid_encoder");
+    cJSON_AddBoolToObject(grid_json, "calibrated", navigation.grid_calibrated);
+    cJSON_AddBoolToObject(grid_json, "correction_active", navigation.grid_correction_active);
+    cJSON_AddNumberToObject(grid_json, "pattern", navigation.infrared_pattern);
+    cJSON_AddNumberToObject(grid_json, "calibrated_mask", navigation.infrared_calibrated_mask);
+    cJSON_AddNumberToObject(grid_json, "last_correction", navigation.last_correction);
+    cJSON *nav_motors = cJSON_AddObjectToObject(nav_json, "motors");
+    cJSON_AddNumberToObject(nav_motors, "left", navigation.motor_left);
+    cJSON_AddNumberToObject(nav_motors, "right", navigation.motor_right);
     cJSON *drive_json = cJSON_AddObjectToObject(root, "drive");
     cJSON_AddNumberToObject(drive_json, "left", drive.left);
     cJSON_AddNumberToObject(drive_json, "right", drive.right);
@@ -206,7 +248,7 @@ static esp_err_t peer_state_handler(httpd_req_t *request)
     cJSON_AddStringToObject(network, "peer_mac", mac);
     cJSON *navigation = cJSON_AddObjectToObject(root, "navigation");
     cJSON_AddNumberToObject(navigation, "phase", peer.navigation_phase);
-    cJSON_AddStringToObject(navigation, "implementation", "stub");
+    cJSON_AddStringToObject(navigation, "implementation", "fused-grid-v1");
     cJSON_AddNumberToObject(navigation, "core", 1);
     cJSON_AddBoolToObject(navigation, "has_target", peer.navigation_has_target);
     cJSON_AddNumberToObject(navigation, "col", peer.navigation_col);
@@ -275,7 +317,20 @@ static esp_err_t target_handler(httpd_req_t *request)
     cJSON *response = cJSON_CreateObject();
     cJSON_AddBoolToObject(response, "ok", true);
     cJSON_AddNumberToObject(response, "request_id", request_id);
-    cJSON_AddStringToObject(response, "implementation", "stub");
+    cJSON_AddStringToObject(response, "implementation", "fused-grid-v1");
+    return send_json(request, response);
+}
+
+static esp_err_t cancel_navigation_handler(httpd_req_t *request)
+{
+    if (app_mode_get() != APP_MODE_TEST) {
+        return send_api_error(request, "409 Conflict", "test_mode_required", ESP_ERR_INVALID_STATE);
+    }
+    const esp_err_t err = navigation_service_cancel(NAVIGATION_CANCEL_USER);
+    if (err != ESP_OK) return send_api_error(request, "500 Internal Server Error",
+                                              "navigation_error", err);
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "ok", true);
     return send_json(request, response);
 }
 
@@ -443,7 +498,7 @@ esp_err_t local_site_service_set_hostname(const char *hostname)
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 9;
     err = httpd_start(&s_server, &config);
     if (err == ESP_OK) {
         const httpd_uri_t state_route = {
@@ -452,6 +507,9 @@ esp_err_t local_site_service_set_hostname(const char *hostname)
             .uri = "/api/v1/drive", .method = HTTP_POST, .handler = drive_handler};
         const httpd_uri_t target_route = {
             .uri = "/api/v1/navigation/target", .method = HTTP_POST, .handler = target_handler};
+        const httpd_uri_t cancel_route = {
+            .uri = "/api/v1/navigation/cancel", .method = HTTP_POST,
+            .handler = cancel_navigation_handler};
         const httpd_uri_t peer_state_route = {
             .uri = "/api/v1/peer/state", .method = HTTP_GET, .handler = peer_state_handler};
         const httpd_uri_t peer_drive_route = {
@@ -466,6 +524,7 @@ esp_err_t local_site_service_set_hostname(const char *hostname)
         err = httpd_register_uri_handler(s_server, &state_route);
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &drive_route);
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &target_route);
+        if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &cancel_route);
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &peer_state_route);
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &peer_drive_route);
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &peer_target_route);

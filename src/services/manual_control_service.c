@@ -6,12 +6,20 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "motor_adapter.h"
+#include "navigation_service.h"
 
 #define DRIVE_WATCHDOG_MS 500
 
 static SemaphoreHandle_t s_lock;
 static manual_control_status_t s_status;
 static int64_t s_deadline_ms;
+
+static int16_t normalize_command(int16_t command)
+{
+    if (command > 0 && command < MOTOR_ADAPTER_MIN_COMMAND) return MOTOR_ADAPTER_MIN_COMMAND;
+    if (command < 0 && command > -MOTOR_ADAPTER_MIN_COMMAND) return -MOTOR_ADAPTER_MIN_COMMAND;
+    return command;
+}
 
 static void watchdog_task(void *argument)
 {
@@ -44,7 +52,10 @@ esp_err_t manual_control_service_set(int16_t left, int16_t right)
 {
     if (s_lock == NULL) return ESP_ERR_INVALID_STATE;
     if (app_mode_get() != APP_MODE_TEST) return ESP_ERR_INVALID_STATE;
-    esp_err_t err = motor_adapter_set(left, right);
+    left = normalize_command(left);
+    right = normalize_command(right);
+    esp_err_t err = navigation_service_cancel(NAVIGATION_CANCEL_MANUAL);
+    if (err == ESP_OK) err = motor_adapter_set(left, right);
     if (err != ESP_OK) return err;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_status.left = left;
