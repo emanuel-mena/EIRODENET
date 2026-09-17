@@ -1,4 +1,4 @@
 {
-    "idf.currentSetup": "c:\\Users\\ecraf\\esp\\esp-idf-v5.4.1",
+    "idf.currentSetup": "${env:USERPROFILE}\\esp\\esp-idf-v5.4.1",
     "C_Cpp.default.compileCommands": "${workspaceFolder}/.pio/build/esp32dev/compile_commands.json"
 }
