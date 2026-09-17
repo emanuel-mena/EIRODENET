@@ -380,8 +380,10 @@ class MainWindow(QMainWindow):
             else: self.value_labels["Distancia"].setText(f"Error {ultrasonic.get('error')}")
             infrared = message.get("infrared", {})
             if infrared.get("valid"):
-                keys = ("front_left", "front_right", "rear_left", "rear_right")
-                self.value_labels["IR"].setText("  ".join(f"{key[:2].upper()}={'●' if infrared.get(key) else '○'}" for key in keys))
+                positions = (("FL", "front_left"), ("FR", "front_right"),
+                             ("RL", "rear_left"), ("RR", "rear_right"))
+                self.value_labels["IR"].setText("  ".join(
+                    f"{label}={int(infrared.get(key, 0))}" for label, key in positions))
             else: self.value_labels["IR"].setText(f"Error {infrared.get('error')}")
             color = message.get("color", {})
             if color.get("valid"):

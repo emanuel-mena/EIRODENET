@@ -32,10 +32,10 @@ físico debe reflejarse allí, sin introducir números GPIO en la lógica de apl
 | HY-SRF05 | Echo | 33 |
 | Sensor de color | NeoPixel | 26 |
 | Sensor de color | Fotoresistencia/ADC1 | 32 |
-| TCRT5000 SEN1 | Delantero izquierdo | 36 |
-| TCRT5000 SEN2 | Delantero derecho | 39 |
-| TCRT5000 SEN3 | Trasero izquierdo | 34 |
-| TCRT5000 SEN4 | Trasero derecho | 35 |
+| TCRT5000 SEN1 | Delantero izquierdo / ADC1_CH7 | 35 |
+| TCRT5000 SEN2 | Delantero derecho / ADC1_CH6 | 34 |
+| TCRT5000 SEN3 | Trasero izquierdo / ADC1_CH3 | 39 |
+| TCRT5000 SEN4 | Trasero derecho / ADC1_CH0 | 36 |
 | LSM6DS3TR-C | SDA | 21 |
 | LSM6DS3TR-C | SCL | 22 |
 | LSM6DS3TR-C | Dirección I2C | `0x6B` |
@@ -54,7 +54,7 @@ resistencias pull-up/pull-down internas.
 | Storage | `app_storage.h` | Inicialización NVS, preferencias y credenciales Wi-Fi |
 | Internet | `internet_adapter.h` | Estación Wi-Fi, reintentos, estado, RSSI e IPv4 |
 | Ultrasónico | `ultrasonic_adapter.h` | Disparo del HY-SRF05 y distancia en milímetros |
-| Infrarrojos | `infrared_adapter.h` | Lectura posicional conjunta de SEN1 a SEN4 |
+| Infrarrojos | `infrared_adapter.h` | Lectura ADC de 12 bits conjunta de SEN1 a SEN4 |
 | Color | `color_sensor_adapter.h` | Iluminación RGB y cuatro muestras ADC reflectivas |
 | IMU adapter | `imu_adapter.h` | Interfaz singleton configurada desde el mapa de pines |
 | Driver IMU | `lsm6ds3tr_c.h` | Registros I2C, identificación y conversión física |

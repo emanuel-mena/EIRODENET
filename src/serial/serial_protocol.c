@@ -285,10 +285,10 @@ static void emit_sensors(void)
     cJSON *ir = cJSON_AddObjectToObject(root, "infrared");
     cJSON_AddBoolToObject(ir, "valid", state.infrared_valid);
     cJSON_AddNumberToObject(ir, "error", state.infrared_error);
-    cJSON_AddBoolToObject(ir, "front_left", state.infrared.front_left);
-    cJSON_AddBoolToObject(ir, "front_right", state.infrared.front_right);
-    cJSON_AddBoolToObject(ir, "rear_left", state.infrared.rear_left);
-    cJSON_AddBoolToObject(ir, "rear_right", state.infrared.rear_right);
+    cJSON_AddNumberToObject(ir, "front_left", state.infrared.front_left);
+    cJSON_AddNumberToObject(ir, "front_right", state.infrared.front_right);
+    cJSON_AddNumberToObject(ir, "rear_left", state.infrared.rear_left);
+    cJSON_AddNumberToObject(ir, "rear_right", state.infrared.rear_right);
     cJSON *color = cJSON_AddObjectToObject(root, "color");
     cJSON_AddBoolToObject(color, "valid", state.color_valid);
     cJSON_AddNumberToObject(color, "error", state.color_error);
