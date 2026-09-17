@@ -47,6 +47,12 @@
 #define BOARD_ENABLE_COLOR_SENSOR 1
 /**@}*/
 
+/** @name Interfaz de modos de la IdeaBoard */
+/**@{*/
+#define BOARD_BOOT_BUTTON_GPIO 0
+#define BOARD_MODE_NEOPIXEL_GPIO 2
+/**@}*/
+
 #if BOARD_ENABLE_IMU && BOARD_ENABLE_COLOR_SENSOR && \
     (BOARD_IMU_SDA_GPIO == BOARD_COLOR_NEOPIXEL_GPIO)
 #error "GPIO26 no puede controlar simultaneamente el NeoPixel y el bus I2C"

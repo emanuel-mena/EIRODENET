@@ -1,0 +1,329 @@
+#include "peer_comms_service.h"
+
+#include <math.h>
+#include <string.h>
+
+#include "app_mode.h"
+#include "app_storage.h"
+#include "esp_log.h"
+#include "esp_now.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "manual_control_service.h"
+#include "navigation_service.h"
+#include "rover_service.h"
+
+#define PEER_MAGIC 0x524f4952U
+#define PEER_PROTOCOL_VERSION 1U
+#define PEER_STATE_PERIOD_MS 200U
+#define PEER_TIMEOUT_MS 1500U
+
+typedef enum {
+    PEER_MESSAGE_STATE = 1,
+    PEER_MESSAGE_DRIVE = 2,
+    PEER_MESSAGE_TARGET = 3,
+} peer_message_type_t;
+
+typedef struct {
+    uint32_t timestamp_ms;
+    uint8_t mode;
+    uint8_t flags;
+    int8_t rssi;
+    uint8_t navigation_phase;
+    float temperature_c;
+    float quaternion[4];
+    uint32_t distance_mm;
+    uint16_t infrared[4];
+    uint16_t color[4];
+    float navigation_col;
+    float navigation_row;
+    uint32_t navigation_request_id;
+    int16_t drive_left;
+    int16_t drive_right;
+} peer_state_payload_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint8_t type;
+    uint8_t source_id;
+    uint32_t sequence;
+    union {
+        peer_state_payload_t state;
+        struct { int16_t left; int16_t right; } drive;
+        struct { float col; float row; } target;
+    } payload;
+} peer_packet_t;
+
+typedef struct {
+    uint8_t source_mac[6];
+    peer_packet_t packet;
+} received_packet_t;
+
+_Static_assert(sizeof(peer_packet_t) <= ESP_NOW_MAX_DATA_LEN, "Paquete ESP-NOW demasiado grande");
+
+static const char *TAG = "peer_comms";
+static SemaphoreHandle_t s_lock;
+static QueueHandle_t s_received;
+static peer_comms_status_t s_status;
+static uint8_t s_own_id;
+static uint32_t s_sequence;
+static int64_t s_last_seen_ms;
+
+static bool valid_identity(uint8_t identity)
+{
+    return identity == APP_STORAGE_ROVER_10 || identity == APP_STORAGE_ROVER_11;
+}
+
+static void receive_callback(const esp_now_recv_info_t *info, const uint8_t *data, int length)
+{
+    if (info == NULL || info->src_addr == NULL || data == NULL ||
+        length != sizeof(peer_packet_t) || s_received == NULL) return;
+    received_packet_t received = {0};
+    memcpy(received.source_mac, info->src_addr, sizeof(received.source_mac));
+    memcpy(&received.packet, data, sizeof(received.packet));
+    if (received.packet.magic != PEER_MAGIC || received.packet.version != PEER_PROTOCOL_VERSION) return;
+    xQueueSend(s_received, &received, 0);
+}
+
+static esp_err_t send_packet(peer_packet_t *packet)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const bool ready = s_status.initialized && s_status.configured;
+    uint8_t peer_mac[6];
+    memcpy(peer_mac, s_status.peer_mac, sizeof(peer_mac));
+    packet->magic = PEER_MAGIC;
+    packet->version = PEER_PROTOCOL_VERSION;
+    packet->source_id = s_own_id;
+    packet->sequence = ++s_sequence;
+    xSemaphoreGive(s_lock);
+    if (!ready) return ESP_ERR_INVALID_STATE;
+    const esp_err_t err = esp_now_send(peer_mac, (const uint8_t *)packet, sizeof(*packet));
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_status.last_error = err;
+    xSemaphoreGive(s_lock);
+    return err;
+}
+
+static void send_local_state(void)
+{
+    rover_imu_state_t imu = {0};
+    rover_sensor_state_t sensors = {0};
+    internet_adapter_status_t wifi = {0};
+    navigation_status_t navigation = {0};
+    manual_control_status_t drive = {0};
+    rover_service_get_imu(&imu);
+    rover_service_get_sensors(&sensors);
+    rover_service_get_wifi(&wifi);
+    navigation_service_get_status(&navigation);
+    manual_control_service_get_status(&drive);
+    peer_packet_t packet = {.type = PEER_MESSAGE_STATE};
+    peer_state_payload_t *state = &packet.payload.state;
+    state->timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    state->mode = (uint8_t)app_mode_get();
+    state->flags = (imu.valid ? 1U : 0U) | (imu.calibration_valid ? 2U : 0U) |
+                   (sensors.ultrasonic_valid ? 4U : 0U) |
+                   (sensors.infrared_valid ? 8U : 0U) |
+                   (sensors.color_valid ? 16U : 0U) |
+                   (navigation.has_target ? 32U : 0U);
+    state->rssi = wifi.rssi;
+    state->navigation_phase = (uint8_t)navigation.phase;
+    state->temperature_c = imu.sample.temperature_c;
+    memcpy(state->quaternion, imu.quaternion, sizeof(state->quaternion));
+    state->distance_mm = sensors.distance_mm;
+    state->infrared[0] = sensors.infrared.front_left;
+    state->infrared[1] = sensors.infrared.front_right;
+    state->infrared[2] = sensors.infrared.rear_left;
+    state->infrared[3] = sensors.infrared.rear_right;
+    state->color[0] = sensors.color.ambient;
+    state->color[1] = sensors.color.red;
+    state->color[2] = sensors.color.green;
+    state->color[3] = sensors.color.blue;
+    state->navigation_col = navigation.col;
+    state->navigation_row = navigation.row;
+    state->navigation_request_id = navigation.request_id;
+    state->drive_left = drive.left;
+    state->drive_right = drive.right;
+    send_packet(&packet);
+}
+
+static void accept_state(const peer_packet_t *packet)
+{
+    const peer_state_payload_t *state = &packet->payload.state;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_status.rover_id = packet->source_id;
+    s_status.timestamp_ms = state->timestamp_ms;
+    s_status.mode = state->mode;
+    s_status.imu_valid = (state->flags & 1U) != 0;
+    s_status.imu_calibrated = (state->flags & 2U) != 0;
+    s_status.ultrasonic_valid = (state->flags & 4U) != 0;
+    s_status.infrared_valid = (state->flags & 8U) != 0;
+    s_status.color_valid = (state->flags & 16U) != 0;
+    s_status.navigation_has_target = (state->flags & 32U) != 0;
+    s_status.temperature_c = state->temperature_c;
+    memcpy(s_status.quaternion, state->quaternion, sizeof(s_status.quaternion));
+    s_status.distance_mm = state->distance_mm;
+    memcpy(s_status.infrared, state->infrared, sizeof(s_status.infrared));
+    memcpy(s_status.color, state->color, sizeof(s_status.color));
+    s_status.rssi = state->rssi;
+    s_status.navigation_phase = state->navigation_phase;
+    s_status.navigation_col = state->navigation_col;
+    s_status.navigation_row = state->navigation_row;
+    s_status.navigation_request_id = state->navigation_request_id;
+    s_status.drive_left = state->drive_left;
+    s_status.drive_right = state->drive_right;
+    s_last_seen_ms = esp_timer_get_time() / 1000;
+    s_status.connected = true;
+    s_status.last_error = ESP_OK;
+    xSemaphoreGive(s_lock);
+}
+
+static void handle_received(const received_packet_t *received)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const bool expected = s_status.configured &&
+        memcmp(received->source_mac, s_status.peer_mac, sizeof(s_status.peer_mac)) == 0;
+    xSemaphoreGive(s_lock);
+    if (!expected || !valid_identity(received->packet.source_id) ||
+        received->packet.source_id == s_own_id) return;
+    switch (received->packet.type) {
+        case PEER_MESSAGE_STATE:
+            accept_state(&received->packet);
+            break;
+        case PEER_MESSAGE_DRIVE:
+            manual_control_service_set(received->packet.payload.drive.left,
+                                       received->packet.payload.drive.right);
+            break;
+        case PEER_MESSAGE_TARGET:
+            navigation_service_submit(received->packet.payload.target.col,
+                                      received->packet.payload.target.row, NULL);
+            break;
+        default:
+            break;
+    }
+}
+
+static esp_err_t initialize_esp_now(void)
+{
+    app_storage_config_t config = {0};
+    esp_err_t err = app_storage_get_config(&config);
+    if (err != ESP_OK || !valid_identity(config.who_am_i) || !config.peer_configured) {
+        return err == ESP_OK ? ESP_ERR_NOT_FOUND : err;
+    }
+    err = esp_now_init();
+    if (err != ESP_OK) return err;
+    err = esp_now_register_recv_cb(receive_callback);
+    const esp_now_peer_info_t peer = {
+        .channel = 0,
+        .ifidx = WIFI_IF_STA,
+        .encrypt = false,
+    };
+    esp_now_peer_info_t configured_peer = peer;
+    memcpy(configured_peer.peer_addr, config.peer_mac, sizeof(config.peer_mac));
+    if (err == ESP_OK) err = esp_now_add_peer(&configured_peer);
+    if (err != ESP_OK) {
+        esp_now_deinit();
+        return err;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_own_id = config.who_am_i;
+    s_status.configured = true;
+    s_status.initialized = true;
+    memcpy(s_status.peer_mac, config.peer_mac, sizeof(config.peer_mac));
+    s_status.last_error = ESP_OK;
+    xSemaphoreGive(s_lock);
+    ESP_LOGI(TAG, "ESP-NOW listo para Rover %u", (unsigned)s_own_id);
+    return ESP_OK;
+}
+
+static void peer_task(void *argument)
+{
+    (void)argument;
+    int64_t next_state_ms = 0;
+    int64_t next_init_ms = 0;
+    while (true) {
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        const bool initialized = s_status.initialized;
+        xSemaphoreGive(s_lock);
+        if (!initialized && now_ms >= next_init_ms) {
+            next_init_ms = now_ms + 1000;
+            internet_adapter_status_t wifi = {0};
+            if (rover_service_get_wifi(&wifi) == ESP_OK && wifi.connected) {
+                const esp_err_t err = initialize_esp_now();
+                if (err != ESP_OK) {
+                    xSemaphoreTake(s_lock, portMAX_DELAY);
+                    s_status.last_error = err;
+                    xSemaphoreGive(s_lock);
+                }
+            }
+        }
+        received_packet_t received;
+        while (xQueueReceive(s_received, &received, 0) == pdTRUE) handle_received(&received);
+        if (initialized && now_ms >= next_state_ms) {
+            send_local_state();
+            next_state_ms = now_ms + PEER_STATE_PERIOD_MS;
+        }
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_status.connected && now_ms - s_last_seen_ms > PEER_TIMEOUT_MS) s_status.connected = false;
+        xSemaphoreGive(s_lock);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+esp_err_t peer_comms_service_start(void)
+{
+    s_lock = xSemaphoreCreateMutex();
+    s_received = xQueueCreate(8, sizeof(received_packet_t));
+    if (s_lock == NULL || s_received == NULL) return ESP_ERR_NO_MEM;
+    app_storage_config_t config = {0};
+    if (app_storage_get_config(&config) == ESP_OK) {
+        s_own_id = config.who_am_i;
+        s_status.configured = config.peer_configured && valid_identity(config.who_am_i);
+        if (s_status.configured) memcpy(s_status.peer_mac, config.peer_mac, sizeof(config.peer_mac));
+    }
+    return xTaskCreate(peer_task, "peer_espnow", 4096, NULL, 5, NULL) == pdPASS
+        ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+void peer_comms_service_get_status(peer_comms_status_t *status)
+{
+    if (status == NULL) return;
+    memset(status, 0, sizeof(*status));
+    if (s_lock == NULL) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *status = s_status;
+    const int64_t age = esp_timer_get_time() / 1000 - s_last_seen_ms;
+    status->age_ms = s_last_seen_ms == 0 ? UINT32_MAX : (uint32_t)(age > UINT32_MAX ? UINT32_MAX : age);
+    status->connected = status->connected && status->age_ms <= PEER_TIMEOUT_MS;
+    xSemaphoreGive(s_lock);
+}
+
+esp_err_t peer_comms_service_send_drive(int16_t left, int16_t right)
+{
+    peer_comms_status_t status;
+    peer_comms_service_get_status(&status);
+    if (!status.connected) return ESP_ERR_INVALID_STATE;
+    if (status.mode != APP_MODE_TEST) return ESP_ERR_INVALID_STATE;
+    peer_packet_t packet = {.type = PEER_MESSAGE_DRIVE};
+    packet.payload.drive.left = left;
+    packet.payload.drive.right = right;
+    return send_packet(&packet);
+}
+
+esp_err_t peer_comms_service_send_target(float col, float row)
+{
+    peer_comms_status_t status;
+    peer_comms_service_get_status(&status);
+    if (!status.connected) return ESP_ERR_INVALID_STATE;
+    if (status.mode != APP_MODE_TEST) return ESP_ERR_INVALID_STATE;
+    if (!isfinite(col) || !isfinite(row) || col < 0.0f || row < 0.0f) return ESP_ERR_INVALID_ARG;
+    peer_packet_t packet = {.type = PEER_MESSAGE_TARGET};
+    packet.payload.target.col = col;
+    packet.payload.target.row = row;
+    return send_packet(&packet);
+}

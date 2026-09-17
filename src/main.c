@@ -1,14 +1,33 @@
 #include <inttypes.h>
+#include "app_mode.h"
 #include "app_storage.h"
+#include "competition_service.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "manual_control_service.h"
+#include "model_partition.h"
 #include "motor_adapter.h"
+#include "navigation_service.h"
+#include "peer_comms_service.h"
 #include "rover_service.h"
 #include "serial_protocol.h"
 
 static const char *TAG = "rover";
 
-/** @brief Ensambla los adapters y ejecuta el diagnóstico periódico del rover. */
+static void report_model(void)
+{
+    model_partition_info_t model;
+    const esp_err_t err = model_partition_validate(&model);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Modelo: version=%" PRIu32 " longitud=%" PRIu32 " CRC32=%08" PRIX32,
+                 model.model_version, model.model_size, model.crc32);
+    } else {
+        ESP_LOGW(TAG, "Inferencia deshabilitada; modelo ausente o invalido: %s",
+                 esp_err_to_name(err));
+    }
+}
+
+/** @brief Ensambla modos, control, navegación y canales de diagnóstico. */
 void app_main(void)
 {
     ESP_LOGI(TAG, "Iniciando adapters EIRODENET");
@@ -26,9 +45,26 @@ void app_main(void)
     } else {
         ESP_LOGI(TAG, "Arranque NVS numero %" PRIu32, boot_count);
     }
+    report_model();
+
+    app_storage_config_t config = {0};
+    if (app_storage_get_config(&config) != ESP_OK) {
+        ESP_LOGW(TAG, "Identidad no disponible; indicador de competencia usara rojo");
+    }
+    err = app_mode_start(config.who_am_i);
+    ESP_LOGI(TAG, "Selector de modo: %s", esp_err_to_name(err));
+    err = navigation_service_start();
+    ESP_LOGI(TAG, "Navegacion en core 1: %s", esp_err_to_name(err));
+    err = manual_control_service_start();
+    ESP_LOGI(TAG, "Control manual seguro: %s", esp_err_to_name(err));
+    err = competition_service_start();
+    ESP_LOGI(TAG, "Competencia: %s", esp_err_to_name(err));
+
     err = rover_service_start();
     ESP_LOGI(TAG, "Servicios del rover: %s", esp_err_to_name(err));
     if (err == ESP_OK) {
+        const esp_err_t peer_err = peer_comms_service_start();
+        ESP_LOGI(TAG, "Enlace ESP-NOW: %s", esp_err_to_name(peer_err));
         err = serial_protocol_start();
         ESP_LOGI(TAG, "Consola de configuracion: %s", esp_err_to_name(err));
     }

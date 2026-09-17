@@ -41,6 +41,8 @@ físico debe reflejarse allí, sin introducir números GPIO en la lógica de apl
 | LSM6DS3TR-C | Dirección I2C | `0x6B` |
 | Motor 1 | Puente H, entrada A/B | 12 / 14 |
 | Motor 2 | Puente H, entrada A/B | 13 / 15 |
+| Botón de modo | BOOT, activo bajo | 0 |
+| Indicador de modo | NeoPixel integrado | 2 |
 
 Todos los GPIO del ESP32 trabajan con lógica de 3.3 V. La salida Echo de un
 HY-SRF05 alimentado a 5 V debe contar con adaptación de nivel si la tarjeta no la
@@ -62,6 +64,11 @@ resistencias pull-up/pull-down internas.
 | Sitio local | `local_site_service.h` | Montaje SPIFFS, HTTP y anuncio mDNS |
 | Servicios | `rover_service.h` | Muestreo concurrente, calibración y fusión de orientación |
 | Serial | `serial_protocol.h` | Configuración y telemetría NDJSON sobre UART0 |
+| Modos | `app_mode.h` | Cambio con BOOT e indicador NeoPixel de prueba/competencia |
+| Navegación | `navigation_service.h` | Cola de objetivos y stub fijado al núcleo 1 |
+| Control manual | `manual_control_service.h` | Comandos web con parada de seguridad a 500 ms |
+| Competencia | `competition_service.h` | Punto de extensión del algoritmo autónomo v2 |
+| Comunicación par | `peer_comms_service.h` | Telemetría y comandos entre rovers mediante ESP-NOW |
 
 Todas las APIs públicas incluyen documentación JavaDoc/Doxygen con parámetros,
 valores de retorno, unidades y precondiciones.
@@ -256,7 +263,8 @@ puede agregar `--synthetic`; `--no-start` exige que el servidor ya esté activo.
 
 ## Sitio web local
 
-`partitions.csv` reserva la partición SPIFFS `static` en `0x600000`, con 2 MiB. El
+`partitions.csv` reserva la partición SPIFFS `static` en `0x400000`, con 2 MiB, y
+conserva la partición TinyML `model` (`data/0x40`) en `0x600000`, con 2 MiB. El
 proyecto Vite vanilla está en `web/` y genera sus archivos optimizados en `data/`.
 `tools/build_web.py` se ejecuta como script previo de PlatformIO al cargar firmware,
 compila la página, crea `.pio/build/esp32dev/spiffs.bin` y la agrega a la misma
@@ -267,6 +275,27 @@ cd web
 npm install
 npm run dev
 ```
+
+La página sólo se conecta por HTTP al rover que la sirve, sin asumir nombres como
+`rover-10.local` o `rover-11.local`. Ese rover expone su propio estado y actúa como
+puente hacia el compañero mediante ESP-NOW y la MAC guardada en `peer_mac`. Ambos
+rovers publican un paquete binario de estado cada 200 ms; tras 1500 ms sin paquetes,
+el panel del compañero se marca desconectado y bloquea telemetría y comandos. Por
+eso se puede abrir, por ejemplo, `http://cecilio.local` y operar ambos paneles sin
+que el navegador conozca la URL o IP del segundo rover.
+
+En modo prueba la web muestra IMU, sensores, red y una flecha 3D de Three.js,
+permite control diferencial directo y acepta objetivos `(col, row)` para el stub de
+navegación. Los comandos destinados al compañero atraviesan ESP-NOW y se validan
+otra vez en el rover receptor. En modo competencia los controles manuales quedan
+deshabilitados.
+
+El firmware siempre inicia en modo prueba. Una pulsación de BOOT alterna entre
+prueba y competencia y detiene los motores. GPIO2 pulsa en azul durante prueba; en
+competencia queda amarillo para Rover 10 y morado para Rover 11. Una identidad sin
+configurar se señala en rojo. El algoritmo de competencia y la ejecución de rutas
+son stubs explícitos en esta iteración: reciben estado u objetivos, pero no generan
+movimiento autónomo.
 
 ## Estructura del repositorio
 
