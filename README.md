@@ -85,18 +85,9 @@ rover suspendido y confirme visualmente que ambas ruedas giren en el sentido cor
 
 ## Credenciales y storage
 
-El archivo `.env` de la raíz debe contener:
-
-```dotenv
-WIFI_SSD=nombre_de_red
-WIFI_PASS=contraseña
-```
-
-También se acepta `WIFI_SSID`. Antes de compilar, `tools/generate_secrets.py`
-genera `include/generated_secrets.h`; ambos archivos están ignorados por Git. En el
-primer arranque las credenciales se guardan en NVS. Los arranques posteriores leen
-NVS, permitiendo reemplazarlas en ejecución mediante
-`app_storage_set_wifi_credentials()` sin modificar `main.c`.
+Las credenciales Wi-Fi se configuran mediante la aplicación de escritorio o el
+protocolo serial y se guardan en NVS. El firmware no incorpora credenciales desde
+`.env` durante la compilación.
 
 ## Preparación, compilación y carga
 
