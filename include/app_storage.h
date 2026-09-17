@@ -12,6 +12,7 @@
 #define APP_STORAGE_WIFI_SSID_MAX_LENGTH 32
 #define APP_STORAGE_WIFI_PASSWORD_MAX_LENGTH 64
 #define APP_STORAGE_IPV4_MAX_LENGTH 15
+#define APP_STORAGE_LOCAL_SITE_MAX_LENGTH 63
 #define IMU_CALIBRATION_VERSION 2U
 #define APP_STORAGE_ROVER_UNCONFIGURED 0U
 #define APP_STORAGE_ROVER_10 10U
@@ -29,6 +30,7 @@ typedef struct {
 /** @brief Configuración completa y persistente del rover. */
 typedef struct {
     uint8_t who_am_i;
+    char local_site[APP_STORAGE_LOCAL_SITE_MAX_LENGTH + 1];
     char wifi_ssid[APP_STORAGE_WIFI_SSID_MAX_LENGTH + 1];
     char wifi_password[APP_STORAGE_WIFI_PASSWORD_MAX_LENGTH + 1];
     bool server_configured;

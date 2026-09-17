@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "imu_adapter.h"
 #include "infrared_adapter.h"
+#include "local_site_service.h"
 #include "ultrasonic_adapter.h"
 
 #define IMU_PERIOD_MS 10
@@ -254,6 +255,11 @@ esp_err_t rover_service_start(void)
     s_color_ready = color_sensor_adapter_init() == ESP_OK;
     esp_err_t err = internet_adapter_init();
     if (err == ESP_OK) {
+        app_storage_config_t config;
+        if (app_storage_get_config(&config) == ESP_OK && config.local_site[0] != '\0') {
+            const esp_err_t site_err = local_site_service_set_hostname(config.local_site);
+            if (site_err != ESP_OK) ESP_LOGE(TAG, "Sitio local: %s", esp_err_to_name(site_err));
+        }
         s_reconnecting = true;
         if (xTaskCreate(reconnect_task, "wifi_connect", 4096, NULL, 4, NULL) != pdPASS) {
             s_reconnecting = false;
@@ -306,6 +312,10 @@ esp_err_t rover_service_set_config(const app_storage_config_t *config, bool *wif
     err = app_storage_set_config(config);
     if (err != ESP_OK) return err;
     *wifi_reconnecting = false;
+    if (strcmp(previous.local_site, config->local_site) != 0) {
+        err = local_site_service_set_hostname(config->local_site);
+        if (err != ESP_OK) return err;
+    }
     if (changed) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
         if (!s_reconnecting) {

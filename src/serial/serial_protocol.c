@@ -107,6 +107,7 @@ static void handle_config_get(double id)
     if (err != ESP_OK) { respond_error(id, "storage_error", err); return; }
     cJSON *data = cJSON_CreateObject();
     cJSON_AddNumberToObject(data, "who_am_i", config.who_am_i);
+    cJSON_AddStringToObject(data, "local_site", config.local_site);
     cJSON_AddStringToObject(data, "wifi_ssid", config.wifi_ssid);
     cJSON_AddStringToObject(data, "wifi_password", config.wifi_password);
     cJSON_AddStringToObject(data, "server_ipv4", config.server_configured ? config.server_ipv4 : "");
@@ -123,19 +124,20 @@ static void handle_config_set(double id, const cJSON *request)
 {
     static const char *const root_allowed[] = {"v", "id", "cmd", "data"};
     static const char *const data_allowed[] = {
-        "who_am_i", "wifi_ssid", "wifi_password", "server_ipv4", "server_port", "peer_mac"};
+        "who_am_i", "local_site", "wifi_ssid", "wifi_password", "server_ipv4", "server_port", "peer_mac"};
     const cJSON *data = cJSON_GetObjectItemCaseSensitive(request, "data");
     if (!has_only(request, root_allowed, 4) || !cJSON_IsObject(data) ||
-        !has_only(data, data_allowed, 6)) {
+        !has_only(data, data_allowed, 7)) {
         respond_error(id, "invalid_fields", ESP_ERR_INVALID_ARG); return;
     }
     const cJSON *who_am_i = cJSON_GetObjectItemCaseSensitive(data, "who_am_i");
+    const cJSON *local_site = cJSON_GetObjectItemCaseSensitive(data, "local_site");
     const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(data, "wifi_ssid");
     const cJSON *password = cJSON_GetObjectItemCaseSensitive(data, "wifi_password");
     const cJSON *server = cJSON_GetObjectItemCaseSensitive(data, "server_ipv4");
     const cJSON *port = cJSON_GetObjectItemCaseSensitive(data, "server_port");
     const cJSON *peer = cJSON_GetObjectItemCaseSensitive(data, "peer_mac");
-    if (!cJSON_IsString(ssid) || !cJSON_IsString(password) || !cJSON_IsString(server) ||
+    if (!cJSON_IsString(local_site) || !cJSON_IsString(ssid) || !cJSON_IsString(password) || !cJSON_IsString(server) ||
         !cJSON_IsNumber(port) || port->valuedouble != port->valueint || !cJSON_IsString(peer)) {
         respond_error(id, "invalid_config", ESP_ERR_INVALID_ARG); return;
     }
@@ -152,6 +154,10 @@ static void handle_config_set(double id, const cJSON *request)
     const uint8_t stored_identity = config.who_am_i;
     memset(&config, 0, sizeof(config));
     config.who_am_i = who_am_i != NULL ? (uint8_t)who_am_i->valueint : stored_identity;
+    if (strlen(local_site->valuestring) > APP_STORAGE_LOCAL_SITE_MAX_LENGTH) {
+        respond_error(id, "invalid_config", ESP_ERR_INVALID_SIZE); return;
+    }
+    strcpy(config.local_site, local_site->valuestring);
     if (strlen(ssid->valuestring) > APP_STORAGE_WIFI_SSID_MAX_LENGTH ||
         strlen(password->valuestring) > APP_STORAGE_WIFI_PASSWORD_MAX_LENGTH ||
         strlen(server->valuestring) > APP_STORAGE_IPV4_MAX_LENGTH) {

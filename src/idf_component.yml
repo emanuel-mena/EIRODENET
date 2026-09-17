@@ -1,4 +1,5 @@
 dependencies:
   espressif/led_strip:
     version: "3.0.3"
-
+  espressif/mdns:
+    version: "1.13.1"

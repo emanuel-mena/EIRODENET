@@ -154,6 +154,8 @@ class MainWindow(QMainWindow):
         self.who_am_i.addItem("Sin configurar", 0)
         self.who_am_i.addItem("Rover 10", 10)
         self.who_am_i.addItem("Rover 11", 11)
+        self.local_site = QLineEdit()
+        self.local_site.setPlaceholderText("rover-10 (vacío para desactivar)")
         self.ssid = QLineEdit(); self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)
         password_row = QWidget(); password_layout = QHBoxLayout(password_row)
@@ -170,6 +172,7 @@ class MainWindow(QMainWindow):
         self.peer_mac.setPlaceholderText("AA:BB:CC:DD:EE:FF")
         form.addRow("MAC de este rover", self.rover_mac)
         form.addRow("WHO_AM_I", self.who_am_i)
+        form.addRow("LOCAL_SITE", self.local_site)
         form.addRow("SSID", self.ssid); form.addRow("Contraseña", password_row)
         form.addRow("IPv4 del servidor", self.server_ip); form.addRow("Puerto", self.server_port)
         form.addRow("MAC del compañero", self.peer_mac)
@@ -300,7 +303,12 @@ class MainWindow(QMainWindow):
         server = self.server_ip.text().strip()
         port_text = self.server_port.text().strip()
         peer = self.peer_mac.text().strip().upper()
+        local_site = self.local_site.text().strip()
         try:
+            if local_site and not re.fullmatch(
+                    r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?", local_site):
+                raise ValueError(
+                    "LOCAL_SITE debe tener 1–63 letras, números, guiones o guiones bajos")
             if server: ipaddress.IPv4Address(server)
             port = int(port_text) if port_text else 0
             if (server and not 1 <= port <= 65535) or (not server and port != 0):
@@ -311,6 +319,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Configuración inválida", str(exc)); return
         self.send_command("config.set", data={
             "who_am_i": self.who_am_i.currentData(),
+            "local_site": local_site,
             "wifi_ssid": self.ssid.text(), "wifi_password": self.password.text(),
             "server_ipv4": server, "server_port": port, "peer_mac": peer})
 
@@ -338,6 +347,7 @@ class MainWindow(QMainWindow):
         elif command == "config.get":
             rover_index = self.who_am_i.findData(data.get("who_am_i", 0))
             self.who_am_i.setCurrentIndex(max(rover_index, 0))
+            self.local_site.setText(str(data.get("local_site", "")))
             self.ssid.setText(data.get("wifi_ssid", ""))
             self.password.setText(data.get("wifi_password", ""))
             self.server_ip.setText(data.get("server_ipv4", ""))

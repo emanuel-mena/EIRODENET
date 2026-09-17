@@ -3,7 +3,7 @@
 **EspressIdea Rover Delivery Network** es el firmware ESP-IDF del rover construido
 para el [Vision Rover Challenge](https://github.com/Universidad-Cenfotec/Vision-Rover-Challenge).
 La aplicación integra movimiento diferencial, percepción local, conectividad Wi-Fi,
-preferencias persistentes y una partición independiente para modelos TinyML.
+preferencias persistentes y un sitio web estático servido desde la propia placa.
 
 El proyecto utiliza PlatformIO sobre una CRCibernética IdeaBoard con ESP32-WROOM-32E
 y flash de 8 MB. Su punto de entrada es `src/main.c`; el hardware se consume mediante
@@ -59,7 +59,7 @@ resistencias pull-up/pull-down internas.
 | IMU adapter | `imu_adapter.h` | Interfaz singleton configurada desde el mapa de pines |
 | Driver IMU | `lsm6ds3tr_c.h` | Registros I2C, identificación y conversión física |
 | Motores | `motor_adapter.h` | PWM independiente, sentido y parada segura |
-| TinyML | `model_partition.h` | Localización y validación de la imagen del modelo |
+| Sitio local | `local_site_service.h` | Montaje SPIFFS, HTTP y anuncio mDNS |
 | Servicios | `rover_service.h` | Muestreo concurrente, calibración y fusión de orientación |
 | Serial | `serial_protocol.h` | Configuración y telemetría NDJSON sobre UART0 |
 
@@ -101,15 +101,16 @@ $env:EIRO_PORT = "PUERTO_SERIAL"
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" device monitor --port $env:EIRO_PORT --baud 115200
 ```
 
-La carga normal actualiza bootloader, tabla de particiones y aplicación, pero no
-escribe la partición `model`.
+Una carga normal con el objetivo `upload` ejecuta el build de Vite, genera la imagen
+SPIFFS y escribe firmware y sitio web en la misma operación. Node.js y npm deben
+estar disponibles en el equipo de desarrollo.
 
 ## Diagnóstico de arranque
 
 `app_main()` inicializa los motores en cero antes que el resto del hardware, abre
-NVS, valida el modelo e inicia los servicios de sensores, Wi-Fi y protocolo serial.
+NVS e inicia los servicios de sensores, Wi-Fi, sitio local y protocolo serial.
 El IMU se adquiere a 100 Hz; la telemetría solicitada por la GUI se publica a 20 Hz,
-5 Hz y 1 Hz según el tema. Un sensor o modelo ausente no impide el funcionamiento
+5 Hz y 1 Hz según el tema. Un sensor ausente no impide el funcionamiento
 de los demás módulos. El monitor serie utiliza 115200 baudios.
 
 En reposo, el acelerómetro debe medir aproximadamente 1 g sobre el eje alineado con
@@ -119,7 +120,7 @@ calibrarse antes de usarlo para navegación inercial acumulativa.
 ## Aplicación de configuración y diagnóstico
 
 La aplicación de escritorio permite editar SSID, contraseña, IPv4/puerto del
-servidor y MAC del rover compañero. También muestra valores y gráficas de 60
+servidor, MAC del rover compañero y la preferencia `LOCAL_SITE`. También muestra valores y gráficas de 60
 segundos para todos los sensores, el estado Wi-Fi y el modelo tridimensional
 `tools/assets/Mini Rover.glb` orientado con el IMU.
 
@@ -149,6 +150,12 @@ del propio rover. La preferencia `WHO_AM_I` identifica persistentemente la placa
 como Rover 10 o Rover 11. Al cambiar las credenciales la placa confirma NVS y
 reconecta la
 estación Wi-Fi sin reiniciar el resto del firmware.
+
+`LOCAL_SITE` guarda el hostname mDNS propio de cada rover. Por ejemplo, los valores
+`rover-10` y `rover-11` publican `http://rover-10.local` y
+`http://rover-11.local` sin conflictos. Un valor vacío desactiva el sitio. Cuando
+está configurado, la placa monta `static`, inicia HTTP en el puerto 80 y anuncia el
+nombre guardado. El equipo cliente debe estar en la misma red y soportar mDNS.
 
 ### Calibración IMU de seis caras
 
@@ -247,24 +254,19 @@ El servidor iniciado por la herramienta se cierra al salir; `--keep-server` lo
 conserva. Un servidor que ya existía nunca se termina. Para pruebas sin cámara se
 puede agregar `--synthetic`; `--no-start` exige que el servidor ya esté activo.
 
-## Modelos TinyML
+## Sitio web local
 
-`partitions.csv` reserva una partición `model` de tipo `data`, subtipo `0x40`, offset
-`0x600000` y tamaño máximo de 2 MiB. El firmware la localiza por nombre y subtipo,
-sin acoplarse al offset fijo.
-
-Sólo se admiten FlatBuffers TensorFlow Lite con identificador `TFL3`. Nunca se debe
-grabar directamente un `.tflite`; primero se crea una imagen EIRM con versión,
-longitud y CRC32:
+`partitions.csv` reserva la partición SPIFFS `static` en `0x600000`, con 2 MiB. El
+proyecto Vite vanilla está en `web/` y genera sus archivos optimizados en `data/`.
+`tools/build_web.py` se ejecuta como script previo de PlatformIO al cargar firmware,
+compila la página, crea `.pio/build/esp32dev/spiffs.bin` y la agrega a la misma
+operación de escritura. Para desarrollo aislado de la interfaz:
 
 ```powershell
-& "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" tools/model_tool.py build modelo.tflite .pio/build/model.bin --version 1
-& "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" tools/model_tool.py flash .pio/build/model.bin --port $env:EIRO_PORT
+cd web
+npm install
+npm run dev
 ```
-
-El comando `flash` vuelve a validar cabecera, firma, límites y CRC antes de escribir.
-Después del reinicio, el firmware informa versión, longitud y CRC; ante ausencia o
-corrupción continúa operando con la inferencia deshabilitada.
 
 ## Estructura del repositorio
 
@@ -273,8 +275,9 @@ include/                 APIs documentadas y mapa de pines
 src/adapters/            Adaptación de sensores, red y actuadores
 src/lsm6ds3tr_c/         Driver I2C del IMU
 src/storage/             Preferencias persistentes NVS
-src/tinyml/              Validación de la partición de modelo
-tools/                   Generación de secretos y empaquetado/flasheo TinyML
+src/services/            Lógica concurrente y servidor del sitio local
+web/                     Proyecto Vite vanilla del sitio embebido
+tools/                   GUI, CLI y automatización del build web
 partitions.csv           Distribución de la flash de 8 MB
 platformio.ini           Entorno de compilación y carga
 ```
