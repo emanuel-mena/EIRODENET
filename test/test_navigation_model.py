@@ -9,8 +9,10 @@ sys.path.insert(0, str(TOOLS))
 from navigation_model import (  # noqa: E402
     checker_pattern,
     controller_command,
+    navigation_inputs_ready,
     normalize_motor,
     sensor_positions,
+    vision_frame_is_new,
     wrap_degrees,
 )
 
@@ -54,3 +56,19 @@ def test_row_axis_points_down_while_positive_theta_points_up() -> None:
     phase, left, right = controller_command(10, 10, 90, 10, 5)
     assert phase == "driving"
     assert left == right == 850
+
+
+def test_repeated_messages_from_one_camera_frame_are_not_new_observations() -> None:
+    assert vision_frame_is_new(None, 1789680978545)
+    assert not vision_frame_is_new(1789680978545, 1789680978545)
+    assert vision_frame_is_new(1789680978545, 1789680978946)
+
+
+def test_navigation_requires_every_safety_input() -> None:
+    ready = dict(vision_connected=True, protocol_valid=True, pose_fresh=True,
+                 imu_valid=True, imu_calibrated=True, infrared_valid=True,
+                 ultrasonic_valid=True)
+    assert navigation_inputs_ready(**ready)
+    for input_name in ready:
+        missing = {**ready, input_name: False}
+        assert not navigation_inputs_ready(**missing)

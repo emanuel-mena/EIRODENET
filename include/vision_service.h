@@ -12,6 +12,7 @@ typedef struct {
     bool protocol_valid;
     bool pose_valid;
     uint32_t sequence;
+    uint64_t frame_timestamp_ms;
     uint64_t received_ms;
     uint32_t age_ms;
     uint8_t rover_id;

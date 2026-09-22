@@ -126,15 +126,18 @@ static esp_err_t state_handler(httpd_req_t *request)
     cJSON *sensor_json = cJSON_AddObjectToObject(root, "sensors");
     cJSON *ultrasonic = cJSON_AddObjectToObject(sensor_json, "ultrasonic");
     cJSON_AddBoolToObject(ultrasonic, "valid", sensors.ultrasonic_valid);
+    cJSON_AddNumberToObject(ultrasonic, "error", sensors.ultrasonic_error);
     cJSON_AddNumberToObject(ultrasonic, "distance_mm", sensors.distance_mm);
     cJSON *infrared = cJSON_AddObjectToObject(sensor_json, "infrared");
     cJSON_AddBoolToObject(infrared, "valid", sensors.infrared_valid);
+    cJSON_AddNumberToObject(infrared, "error", sensors.infrared_error);
     cJSON_AddNumberToObject(infrared, "front_left", sensors.infrared.front_left);
     cJSON_AddNumberToObject(infrared, "front_right", sensors.infrared.front_right);
     cJSON_AddNumberToObject(infrared, "rear_left", sensors.infrared.rear_left);
     cJSON_AddNumberToObject(infrared, "rear_right", sensors.infrared.rear_right);
     cJSON *color = cJSON_AddObjectToObject(sensor_json, "color");
     cJSON_AddBoolToObject(color, "valid", sensors.color_valid);
+    cJSON_AddNumberToObject(color, "error", sensors.color_error);
     cJSON_AddNumberToObject(color, "ambient", sensors.color.ambient);
     cJSON_AddNumberToObject(color, "red", sensors.color.red);
     cJSON_AddNumberToObject(color, "green", sensors.color.green);
@@ -313,7 +316,9 @@ static esp_err_t target_handler(httpd_req_t *request)
     const esp_err_t err = navigation_service_submit((float)col->valuedouble,
                                                      (float)row->valuedouble, &request_id);
     cJSON_Delete(body);
-    if (err != ESP_OK) return send_api_error(request, "400 Bad Request", "invalid_target", err);
+    if (err != ESP_OK) return send_api_error(request,
+        err == ESP_ERR_INVALID_STATE ? "409 Conflict" : "400 Bad Request",
+        err == ESP_ERR_INVALID_STATE ? "navigation_not_ready" : "invalid_target", err);
     cJSON *response = cJSON_CreateObject();
     cJSON_AddBoolToObject(response, "ok", true);
     cJSON_AddNumberToObject(response, "request_id", request_id);

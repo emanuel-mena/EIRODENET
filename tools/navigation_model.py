@@ -11,6 +11,21 @@ import math
 SENSOR_OFFSETS_MM = ((10.0, 20.0), (10.0, -20.0), (-10.0, 20.0), (-10.0, -20.0))
 
 
+def vision_frame_is_new(previous_timestamp_ms: int | None, timestamp_ms: int) -> bool:
+    """Distingue capturas de cámara de mensajes TCP repetidos."""
+    return previous_timestamp_ms is None or timestamp_ms != previous_timestamp_ms
+
+
+def navigation_inputs_ready(
+    *, vision_connected: bool, protocol_valid: bool, pose_fresh: bool,
+    imu_valid: bool, imu_calibrated: bool, infrared_valid: bool,
+    ultrasonic_valid: bool,
+) -> bool:
+    """Replica las precondiciones de seguridad para aceptar un objetivo."""
+    return all((vision_connected, protocol_valid, pose_fresh, imu_valid,
+                imu_calibrated, infrared_valid, ultrasonic_valid))
+
+
 def normalize_motor(command: int) -> int:
     if 0 < command < 700:
         return 700

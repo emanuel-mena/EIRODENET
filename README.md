@@ -292,13 +292,17 @@ para navegación punto a punto. Los comandos destinados al compañero atraviesan
 otra vez en el rover receptor. En modo competencia los controles manuales quedan
 deshabilitados.
 
-La navegación exige primero una pose v2 fresca del servidor configurado. Después
+La navegación exige primero una pose v2 fresca del servidor configurado, una IMU
+calibrada y lecturas válidas de infrarrojos y ultrasónico. Si falta cualquiera de
+estas precondiciones, la API rechaza el objetivo sin activar los motores. Después
 predice a 100 Hz con el giroscopio y usa los cuatro TCRT5000 como encoder sobre la
 cuadrícula de 20 mm; aprende automáticamente los dos niveles de cada sensor y su
-polaridad. Patrones ambiguos no corrigen la pose. Si cae la visión continúa de forma
-local y publica incertidumbre; un obstáculo ultrasónico a 150 mm, un fallo de IMU/IR,
-un cambio de modo o un mando manual detienen y cancelan el movimiento. Se puede
-detener explícitamente con `POST /api/v1/navigation/cancel`.
+polaridad. Las retransmisiones con el mismo `ts_ms` no se vuelven a fusionar como si
+fueran capturas nuevas y la pose caduca después de 750 ms sin una captura nueva.
+Patrones ambiguos no corrigen la pose. Si cae la visión continúa de forma local y
+publica incertidumbre; un obstáculo ultrasónico a 150 mm, un fallo de IMU/IR, la
+pérdida del ultrasónico, un cambio de modo o un mando manual detienen y cancelan el
+movimiento. Se puede detener explícitamente con `POST /api/v1/navigation/cancel`.
 
 El firmware siempre inicia en modo prueba. Una pulsación de BOOT alterna entre
 prueba y competencia y detiene los motores. GPIO2 pulsa en azul durante prueba; en

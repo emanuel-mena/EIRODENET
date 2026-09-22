@@ -17,7 +17,7 @@
 
 #define VISION_PROTOCOL_VERSION 2
 #define VISION_MAX_LINE_BYTES 16384
-#define VISION_MAX_POSE_AGE_MS 500U
+#define VISION_MAX_POSE_AGE_MS 750U
 #define VISION_RECONNECT_MS 1000U
 
 static const char *TAG = "vision_client";
@@ -208,24 +208,33 @@ static void parse_line(const char *line, size_t length, uint8_t own_id)
     }
     const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
     const cJSON *seq = cJSON_GetObjectItemCaseSensitive(root, "seq");
+    const cJSON *timestamp = cJSON_GetObjectItemCaseSensitive(root, "ts_ms");
+    const uint64_t frame_timestamp_ms = (uint64_t)timestamp->valuedouble;
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    const bool new_frame = s_status.received_ms == 0 ||
+                           s_status.frame_timestamp_ms != frame_timestamp_ms;
     s_status.protocol_valid = true;
     s_status.sequence = (uint32_t)seq->valuedouble;
-    s_status.received_ms = now_ms;
     s_status.grid_cols = cols;
     s_status.grid_rows = rows;
     s_status.cell_mm = cell_mm;
     s_status.rover_id = own_id;
-    s_status.pose_valid = false;
     s_status.last_error = ESP_OK;
-    if (rover != NULL) {
-        const uint32_t age = (uint32_t)cJSON_GetObjectItemCaseSensitive(rover, "age_ms")->valuedouble;
-        s_status.age_ms = age;
-        if (age <= VISION_MAX_POSE_AGE_MS) {
-            s_status.col = (float)cJSON_GetObjectItemCaseSensitive(rover, "col")->valuedouble;
-            s_status.row = (float)cJSON_GetObjectItemCaseSensitive(rover, "row")->valuedouble;
-            s_status.theta_deg = (float)cJSON_GetObjectItemCaseSensitive(rover, "theta")->valuedouble;
-            s_status.pose_valid = true;
+    if (new_frame) {
+        s_status.frame_timestamp_ms = frame_timestamp_ms;
+        s_status.received_ms = now_ms;
+        s_status.pose_valid = false;
+        if (rover != NULL) {
+            const uint32_t age =
+                (uint32_t)cJSON_GetObjectItemCaseSensitive(rover, "age_ms")->valuedouble;
+            s_status.age_ms = age;
+            if (age <= VISION_MAX_POSE_AGE_MS) {
+                s_status.col = (float)cJSON_GetObjectItemCaseSensitive(rover, "col")->valuedouble;
+                s_status.row = (float)cJSON_GetObjectItemCaseSensitive(rover, "row")->valuedouble;
+                s_status.theta_deg =
+                    (float)cJSON_GetObjectItemCaseSensitive(rover, "theta")->valuedouble;
+                s_status.pose_valid = true;
+            }
         }
     }
     xSemaphoreGive(s_lock);

@@ -44,7 +44,7 @@ typedef struct {
     float col, row, theta_deg;
     float speed_cells_s, angular_speed_dps, gyro_bias_dps;
     float vision_heading_offset_deg, uncertainty_cells;
-    uint32_t vision_sequence;
+    uint64_t vision_frame_timestamp_ms;
     uint64_t vision_ms, grid_ms;
     float vision_col, vision_row;
     uint8_t previous_pattern;
@@ -180,7 +180,8 @@ static bool match_grid(uint8_t observed, float cell_mm, float *col, float *row, 
 static void apply_vision(const vision_status_t *vision, uint64_t now_ms)
 {
     if (!vision->pose_valid ||
-        (s_estimator.vision_ms != 0 && vision->sequence == s_estimator.vision_sequence)) return;
+        (s_estimator.vision_ms != 0 &&
+         vision->frame_timestamp_ms == s_estimator.vision_frame_timestamp_ms)) return;
     if (!s_estimator.initialized) {
         s_estimator.initialized = true;
         s_estimator.col = vision->col;
@@ -209,7 +210,7 @@ static void apply_vision(const vision_status_t *vision, uint64_t now_ms)
     s_estimator.vision_ms = now_ms;
     s_estimator.vision_col = vision->col;
     s_estimator.vision_row = vision->row;
-    s_estimator.vision_sequence = vision->sequence;
+    s_estimator.vision_frame_timestamp_ms = vision->frame_timestamp_ms;
     s_status.last_correction = NAVIGATION_CORRECTION_VISION;
 }
 
@@ -304,7 +305,8 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         finish_locked(NAVIGATION_CANCELLED, ESP_ERR_INVALID_STATE);
         return;
     }
-    if (!s_estimator.initialized || !imu->valid || !sensors->infrared_valid ||
+    if (!s_estimator.initialized || !imu->valid || !imu->calibration_valid ||
+        !sensors->infrared_valid || !sensors->ultrasonic_valid ||
         s_estimator.uncertainty_cells > UNCERTAINTY_LIMIT_CELLS) {
         finish_locked(NAVIGATION_ERROR, ESP_ERR_INVALID_RESPONSE);
         return;
@@ -401,9 +403,15 @@ esp_err_t navigation_service_submit(float col, float row, uint32_t *request_id)
     if (s_lock == NULL || app_mode_get() != APP_MODE_TEST || !isfinite(col) || !isfinite(row))
         return ESP_ERR_INVALID_STATE;
     vision_status_t vision = {0};
+    rover_imu_state_t imu = {0};
+    rover_sensor_state_t sensors = {0};
     vision_service_get_status(&vision);
+    rover_service_get_imu(&imu);
+    rover_service_get_sensors(&sensors);
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (!s_estimator.initialized || !vision.grid_cols || !vision.grid_rows) {
+    if (!s_estimator.initialized || !vision.connected || !vision.protocol_valid ||
+        !vision.pose_valid || !vision.grid_cols || !vision.grid_rows || !imu.valid ||
+        !imu.calibration_valid || !sensors.infrared_valid || !sensors.ultrasonic_valid) {
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }

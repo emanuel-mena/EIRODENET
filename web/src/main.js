@@ -25,7 +25,7 @@ function roverCard(id) {
     <div class="offline">Sin conexión con Rover ${id}. Sus datos y comandos están bloqueados.</div>
     <fieldset disabled>
       <div class="mode-line"><span class="mode-pill">—</span><span class="ip">Sin IP</span><span class="rssi">— dBm</span></div>
-      <section class="orientation"><div class="arrow" aria-label="Dirección tridimensional del rover"></div><div><p class="section-label">ORIENTACIÓN IMU</p><strong class="temperature">— °C</strong><p class="imu-state">Esperando lectura</p></div></section>
+      <section class="orientation"><div class="arrow" aria-label="Dirección tridimensional del rover"></div><div><p class="section-label">ORIENTACIÓN IMU</p><strong class="imu-angle">— °</strong><p class="imu-axis">Giro Z</p><strong class="temperature">— °C</strong><p class="imu-state">Esperando lectura</p></div></section>
       <section><p class="section-label">SENSORES</p><div class="sensor-grid">
         <div><small>Distancia</small><strong data-sensor="distance">—</strong><span>mm</span></div>
         <div><small>IR frente</small><strong data-sensor="ir-front">— / —</strong></div>
@@ -83,7 +83,7 @@ function clearTelemetry(rover) {
   const e = rover.element
   delete e.dataset.mode
   e.querySelector('.mode-pill').textContent = '—'; e.querySelector('.ip').textContent = 'Sin IP'; e.querySelector('.rssi').textContent = '— dBm'
-  e.querySelector('.temperature').textContent = '— °C'; e.querySelector('.imu-state').textContent = 'Esperando lectura'
+  e.querySelector('.imu-angle').textContent = '— °'; e.querySelector('.temperature').textContent = '— °C'; e.querySelector('.imu-state').textContent = 'Esperando lectura'
   setText(e, 'distance', '—'); setText(e, 'ir-front', '— / —'); setText(e, 'ir-rear', '— / —'); setText(e, 'color', '— / — / —')
   for (const key of ['pose', 'speed', 'vision', 'grid']) e.querySelector(`[data-nav="${key}"]`).textContent = `${key} —`
   rover.orientation.quaternion.identity()
@@ -112,11 +112,17 @@ function updateRover(rover, data) {
   e.querySelector('.ip').textContent = data.network.ipv4; e.querySelector('.rssi').textContent = `${data.network.rssi} dBm`
   e.querySelector('.temperature').textContent = data.imu.valid ? `${data.imu.temperature_c.toFixed(1)} °C` : '— °C'
   e.querySelector('.imu-state').textContent = data.imu.valid ? (data.imu.calibrated ? 'Calibrada' : 'Sin calibrar') : `No disponible · error ${data.imu.error}`
-  if (data.imu.valid && data.imu.quaternion?.length === 4) { const [w, x, y, z] = data.imu.quaternion; rover.orientation.quaternion.set(x, y, z, w).normalize() }
-  setText(e, 'distance', data.sensors.ultrasonic.valid ? data.sensors.ultrasonic.distance_mm : '—')
-  setText(e, 'ir-front', data.sensors.infrared.valid ? `${data.sensors.infrared.front_left} / ${data.sensors.infrared.front_right}` : '— / —')
+  e.querySelector('.imu-angle').textContent = '— °'
+  if (data.imu.valid && data.imu.quaternion?.length === 4 && data.imu.quaternion.every(Number.isFinite)) {
+    const [w, x, y, z] = data.imu.quaternion
+    const q = rover.orientation.quaternion.set(x, y, z, w).normalize()
+    const yaw = Math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+    e.querySelector('.imu-angle').textContent = `${THREE.MathUtils.radToDeg(yaw).toFixed(1)} °`
+  }
+  setText(e, 'distance', data.sensors.ultrasonic.valid ? data.sensors.ultrasonic.distance_mm : `error ${data.sensors.ultrasonic.error ?? '—'}`)
+  setText(e, 'ir-front', data.sensors.infrared.valid ? `${data.sensors.infrared.front_left} / ${data.sensors.infrared.front_right}` : `error ${data.sensors.infrared.error ?? '—'}`)
   setText(e, 'ir-rear', data.sensors.infrared.valid ? `${data.sensors.infrared.rear_left} / ${data.sensors.infrared.rear_right}` : '— / —')
-  setText(e, 'color', data.sensors.color.valid ? `${data.sensors.color.red} / ${data.sensors.color.green} / ${data.sensors.color.blue}` : '— / — / —')
+  setText(e, 'color', data.sensors.color.valid ? `${data.sensors.color.red} / ${data.sensors.color.green} / ${data.sensors.color.blue}` : `error ${data.sensors.color.error ?? '—'}`)
   e.querySelectorAll('.controls button, .controls input').forEach(control => { control.disabled = competition })
   const nav = data.navigation; const pose = nav.pose || {}; const vision = nav.vision || {}; const grid = nav.grid_encoder || {}
   e.querySelector('.nav-state').textContent = nav.has_target
