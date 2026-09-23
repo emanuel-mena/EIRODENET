@@ -30,6 +30,17 @@ typedef struct {
     float navigation_col;
     float navigation_row;
     uint32_t navigation_request_id;
+    int16_t navigation_cell_col;
+    int16_t navigation_cell_row;
+    uint8_t navigation_heading_index;
+    float navigation_heading_deg;
+    float navigation_waypoint_col;
+    float navigation_waypoint_row;
+    uint16_t navigation_segment_count;
+    uint16_t navigation_segment_index;
+    uint8_t navigation_blind_crossings;
+    uint32_t navigation_replans;
+    uint8_t navigation_wait_reason;
     int16_t drive_left;
     int16_t drive_right;
 } peer_comms_status_t;

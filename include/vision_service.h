@@ -5,6 +5,15 @@
 
 #include "esp_err.h"
 
+#define VISION_MAX_OBSTACLES 32U
+#define VISION_MAX_ROVERS 2U
+
+typedef struct {
+    float col;
+    float row;
+    uint32_t age_ms;
+} vision_position_t;
+
 /** Última pose propia aceptada del contrato TCP/NDJSON de visión v2. */
 typedef struct {
     bool configured;
@@ -19,6 +28,14 @@ typedef struct {
     float col;
     float row;
     float theta_deg;
+    bool peer_valid;
+    uint8_t peer_id;
+    float peer_col;
+    float peer_row;
+    float peer_theta_deg;
+    uint32_t peer_age_ms;
+    uint8_t obstacle_count;
+    vision_position_t obstacles[VISION_MAX_OBSTACLES];
     uint16_t grid_cols;
     uint16_t grid_rows;
     float cell_mm;

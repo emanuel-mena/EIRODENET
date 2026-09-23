@@ -126,13 +126,16 @@ static bool valid_contract(const cJSON *root, const cJSON **own_rover,
     const cJSON *depots = cJSON_GetObjectItemCaseSensitive(root, "depots");
     if (!cJSON_IsArray(rovers) || !cJSON_IsArray(cubes) || !cJSON_IsArray(obstacles) ||
         !cJSON_IsArray(depots)) return false;
+    if (cJSON_GetArraySize(rovers) > VISION_MAX_ROVERS ||
+        cJSON_GetArraySize(obstacles) > VISION_MAX_OBSTACLES) return false;
     *own_rover = NULL;
     const cJSON *item = NULL;
     cJSON_ArrayForEach(item, rovers) {
         if (!valid_position_object(item, rover_fields, 5, true)) return false;
         const cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "id");
         const cJSON *theta = cJSON_GetObjectItemCaseSensitive(item, "theta");
-        if (!integer_number(id) || id->valuedouble < 0 || !finite_number(theta) ||
+        if (!integer_number(id) || id->valuedouble < 0 || id->valuedouble > UINT8_MAX ||
+            !finite_number(theta) ||
             theta->valuedouble < 0 || theta->valuedouble > 360) return false;
         const cJSON *other = rovers->child;
         while (other != item) {
@@ -224,6 +227,8 @@ static void parse_line(const char *line, size_t length, uint8_t own_id)
         s_status.frame_timestamp_ms = frame_timestamp_ms;
         s_status.received_ms = now_ms;
         s_status.pose_valid = false;
+        s_status.peer_valid = false;
+        s_status.obstacle_count = 0;
         if (rover != NULL) {
             const uint32_t age =
                 (uint32_t)cJSON_GetObjectItemCaseSensitive(rover, "age_ms")->valuedouble;
@@ -235,6 +240,28 @@ static void parse_line(const char *line, size_t length, uint8_t own_id)
                     (float)cJSON_GetObjectItemCaseSensitive(rover, "theta")->valuedouble;
                 s_status.pose_valid = true;
             }
+        }
+        const cJSON *rovers = cJSON_GetObjectItemCaseSensitive(root, "rovers");
+        const cJSON *item = NULL;
+        cJSON_ArrayForEach(item, rovers) {
+            const uint8_t id = (uint8_t)cJSON_GetObjectItemCaseSensitive(item, "id")->valueint;
+            if (id == own_id) continue;
+            s_status.peer_id = id;
+            s_status.peer_col = (float)cJSON_GetObjectItemCaseSensitive(item, "col")->valuedouble;
+            s_status.peer_row = (float)cJSON_GetObjectItemCaseSensitive(item, "row")->valuedouble;
+            s_status.peer_theta_deg =
+                (float)cJSON_GetObjectItemCaseSensitive(item, "theta")->valuedouble;
+            s_status.peer_age_ms =
+                (uint32_t)cJSON_GetObjectItemCaseSensitive(item, "age_ms")->valuedouble;
+            s_status.peer_valid = s_status.peer_age_ms <= VISION_MAX_POSE_AGE_MS;
+        }
+        const cJSON *obstacles = cJSON_GetObjectItemCaseSensitive(root, "obstacles");
+        cJSON_ArrayForEach(item, obstacles) {
+            vision_position_t *position = &s_status.obstacles[s_status.obstacle_count++];
+            position->col = (float)cJSON_GetObjectItemCaseSensitive(item, "col")->valuedouble;
+            position->row = (float)cJSON_GetObjectItemCaseSensitive(item, "row")->valuedouble;
+            position->age_ms =
+                (uint32_t)cJSON_GetObjectItemCaseSensitive(item, "age_ms")->valuedouble;
         }
     }
     xSemaphoreGive(s_lock);
@@ -339,12 +366,21 @@ void vision_service_get_status(vision_status_t *status)
     if (status == NULL || s_lock == NULL) return;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *status = s_status;
-    if (status->pose_valid && status->received_ms > 0) {
+    if (status->received_ms > 0) {
         const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
         const uint64_t elapsed = now_ms > status->received_ms ? now_ms - status->received_ms : 0;
-        status->age_ms = elapsed > UINT32_MAX - status->age_ms
-            ? UINT32_MAX : status->age_ms + (uint32_t)elapsed;
-        status->pose_valid = status->age_ms <= VISION_MAX_POSE_AGE_MS;
+        if (elapsed > UINT32_MAX - status->age_ms) status->age_ms = UINT32_MAX;
+        else status->age_ms += (uint32_t)elapsed;
+        status->pose_valid = status->pose_valid && status->age_ms <= VISION_MAX_POSE_AGE_MS;
+        if (elapsed > UINT32_MAX - status->peer_age_ms) status->peer_age_ms = UINT32_MAX;
+        else status->peer_age_ms += (uint32_t)elapsed;
+        status->peer_valid = status->peer_valid &&
+                             status->peer_age_ms <= VISION_MAX_POSE_AGE_MS;
+        for (uint8_t i = 0; i < status->obstacle_count; ++i) {
+            if (elapsed > UINT32_MAX - status->obstacles[i].age_ms)
+                status->obstacles[i].age_ms = UINT32_MAX;
+            else status->obstacles[i].age_ms += (uint32_t)elapsed;
+        }
     }
     xSemaphoreGive(s_lock);
 }

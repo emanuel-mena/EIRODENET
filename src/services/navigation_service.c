@@ -1,8 +1,8 @@
 #include "navigation_service.h"
 
-#include <float.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "app_mode.h"
 #include "esp_log.h"
@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "grid_planner.h"
 #include "motor_adapter.h"
 #include "rover_service.h"
 #include "vision_service.h"
@@ -18,20 +19,31 @@
 #define GRID_MIN_ADC_SPAN 220
 #define SENSOR_FRONT_MM 10.0f
 #define SENSOR_LEFT_MM 20.0f
-#define GRID_SEARCH_CELLS 0.45f
-#define GRID_SEARCH_STEP 0.05f
 #define UNCERTAINTY_LIMIT_CELLS 25.0f
+#define NAV_MAX_SEGMENTS 1024U
+#define NAV_GRID_MARGIN_CELLS 2
+#define NAV_OBSTACLE_RADIUS_CELLS 5
+#define NAV_PEER_RADIUS_CELLS 4
+#define NAV_MAX_BLIND_CROSSINGS 2U
+#define CELL_BOUNDARY_HYSTERESIS 0.12f
+#define SENSOR_INVALID_SAMPLES 3U
 #define TURN_PWM 700
 #define DRIVE_PWM 850
 #define SLOW_PWM 700
 #define MAX_PWM 1000
 #define ENTER_DRIVE_DEG 8.0f
-#define RETURN_TURN_DEG 25.0f
+#define RETURN_TURN_DEG 15.0f
 #define SLOW_DISTANCE_CELLS 3.0f
-#define ARRIVAL_CELLS 0.75f
+#define ARRIVAL_CELLS 0.40f
 #define ARRIVAL_SAMPLES 5
+#define ARRIVAL_MAX_SPEED_CELLS_S 0.35f
+#define SLOW_PULSE_CONTROL_TICKS 2U
+#define ALIGNMENT_SAMPLES 5
+#define MISALIGNMENT_SAMPLES 3
+#define IR_STABLE_SAMPLES 3
 #define OBSTACLE_MM 150U
 #define OBSTACLE_SAMPLES 3
+#define VISION_FRESH_MS 750U
 
 typedef struct {
     uint16_t low, high;
@@ -45,18 +57,42 @@ typedef struct {
     float speed_cells_s, angular_speed_dps, gyro_bias_dps;
     float vision_heading_offset_deg, uncertainty_cells;
     uint64_t vision_frame_timestamp_ms;
-    uint64_t vision_ms, grid_ms;
+    uint64_t vision_ms;
     float vision_col, vision_row;
-    uint8_t previous_pattern;
     grid_sensor_t sensor[4];
 } estimator_t;
+
+typedef struct {
+    float start_col, start_row;
+    float end_col, end_row;
+    int8_t delta_col, delta_row;
+    uint8_t heading_index;
+} route_segment_t;
+
+typedef struct {
+    bool valid;
+    uint16_t segment_count, segment_index;
+    route_segment_t segments[NAV_MAX_SEGMENTS];
+    grid_planner_route_t cells;
+    uint16_t cell_index;
+    uint64_t occupancy_frame_timestamp_ms;
+} navigation_route_t;
 
 static const char *TAG = "navigation";
 static SemaphoreHandle_t s_lock;
 static navigation_status_t s_status = {.phase = NAVIGATION_WAITING_FOR_POSE, .core_id = 1};
 static estimator_t s_estimator;
+static navigation_route_t s_route;
+static uint8_t s_occupancy[GRID_PLANNER_MAX_CELLS];
 static uint32_t s_next_request;
 static uint8_t s_arrival_samples, s_obstacle_samples;
+static uint8_t s_alignment_samples, s_misalignment_samples;
+static uint8_t s_slow_pulse_ticks;
+static uint8_t s_ultrasonic_invalid_samples;
+static uint64_t s_ultrasonic_sample_ms;
+static uint8_t s_stable_pattern, s_stable_pattern_samples;
+static uint8_t s_confirmed_pattern;
+static bool s_confirmed_cell_valid;
 
 static float wrap_degrees(float angle)
 {
@@ -70,6 +106,46 @@ static float angle_error(float target, float current) { return wrap_degrees(targ
 static float blend_angle(float current, float target, float gain)
 {
     return wrap_degrees(current + gain * angle_error(target, current));
+}
+
+static int sign_float(float value)
+{
+    return value > 0.0001f ? 1 : (value < -0.0001f ? -1 : 0);
+}
+
+static uint8_t direction_index(int delta_col, int delta_row)
+{
+    static const int8_t directions[8][2] = {
+        {1, 0}, {1, -1}, {0, -1}, {-1, -1},
+        {-1, 0}, {-1, 1}, {0, 1}, {1, 1},
+    };
+    for (uint8_t i = 0; i < 8; ++i)
+        if (directions[i][0] == delta_col && directions[i][1] == delta_row) return i;
+    return 0;
+}
+
+static float direction_heading(uint8_t index)
+{
+    return 45.0f * index;
+}
+
+static int coordinate_cell(float coordinate, uint8_t dimension)
+{
+    int cell = (int)floorf(coordinate);
+    if (cell < 0) cell = 0;
+    if (cell >= dimension) cell = dimension - 1;
+    return cell;
+}
+
+static int stable_coordinate_cell(float coordinate, int confirmed, uint8_t dimension)
+{
+    const int candidate = coordinate_cell(coordinate, dimension);
+    if (!s_confirmed_cell_valid || candidate == confirmed) return candidate;
+    if (candidate == confirmed + 1 &&
+        coordinate < (float)(confirmed + 1) + CELL_BOUNDARY_HYSTERESIS) return confirmed;
+    if (candidate == confirmed - 1 &&
+        coordinate > (float)confirmed - CELL_BOUNDARY_HYSTERESIS) return confirmed;
+    return candidate;
 }
 
 static uint8_t classify_ir(const infrared_adapter_state_t *ir)
@@ -153,35 +229,11 @@ static uint8_t calibration_mask(void)
     return mask;
 }
 
-static bool match_grid(uint8_t observed, float cell_mm, float *col, float *row, float *theta)
-{
-    if (calibration_mask() != 0x0f || observed == 0 || observed == 0x0f ||
-        observed == s_estimator.previous_pattern) return false;
-    float best = FLT_MAX, second = FLT_MAX;
-    for (float dx = -GRID_SEARCH_CELLS; dx <= GRID_SEARCH_CELLS + 0.001f; dx += GRID_SEARCH_STEP) {
-        for (float dy = -GRID_SEARCH_CELLS; dy <= GRID_SEARCH_CELLS + 0.001f; dy += GRID_SEARCH_STEP) {
-            for (float da = -8.0f; da <= 8.001f; da += 4.0f) {
-                if (expected_pattern(s_estimator.col + dx, s_estimator.row + dy,
-                                     s_estimator.theta_deg + da, cell_mm) != observed) continue;
-                const float cost = dx * dx + dy * dy + (da / 20.0f) * (da / 20.0f);
-                if (cost < best) {
-                    second = best;
-                    best = cost;
-                    *col = s_estimator.col + dx;
-                    *row = s_estimator.row + dy;
-                    *theta = wrap_degrees(s_estimator.theta_deg + da);
-                } else if (cost < second) second = cost;
-            }
-        }
-    }
-    return best != FLT_MAX && second - best >= 0.0004f;
-}
-
-static void apply_vision(const vision_status_t *vision, uint64_t now_ms)
+static bool apply_vision(const vision_status_t *vision, uint64_t now_ms)
 {
     if (!vision->pose_valid ||
         (s_estimator.vision_ms != 0 &&
-         vision->frame_timestamp_ms == s_estimator.vision_frame_timestamp_ms)) return;
+         vision->frame_timestamp_ms == s_estimator.vision_frame_timestamp_ms)) return false;
     if (!s_estimator.initialized) {
         s_estimator.initialized = true;
         s_estimator.col = vision->col;
@@ -212,12 +264,19 @@ static void apply_vision(const vision_status_t *vision, uint64_t now_ms)
     s_estimator.vision_row = vision->row;
     s_estimator.vision_frame_timestamp_ms = vision->frame_timestamp_ms;
     s_status.last_correction = NAVIGATION_CORRECTION_VISION;
+    return true;
 }
 
-static void update_estimator(const rover_imu_state_t *imu, const rover_sensor_state_t *sensors,
+static bool update_estimator(const rover_imu_state_t *imu, const rover_sensor_state_t *sensors,
                              const vision_status_t *vision, float dt, uint64_t now_ms)
 {
     const uint8_t observed = sensors->infrared_valid ? classify_ir(&sensors->infrared) : 0;
+    if (observed == s_stable_pattern) {
+        if (s_stable_pattern_samples < UINT8_MAX) ++s_stable_pattern_samples;
+    } else {
+        s_stable_pattern = observed;
+        s_stable_pattern_samples = 1;
+    }
     if (sensors->infrared_valid) learn_polarity(observed, vision);
     if (s_estimator.initialized && imu->valid) {
         if (!s_status.motor_left && !s_status.motor_right && fabsf(imu->sample.gyro_dps[2]) < 5.0f)
@@ -232,37 +291,226 @@ static void update_estimator(const rover_imu_state_t *imu, const rover_sensor_st
         s_estimator.uncertainty_cells += vision->pose_valid ? 0.0002f : 0.0015f;
         s_status.last_correction = NAVIGATION_CORRECTION_IMU;
     }
-    apply_vision(vision, now_ms);
+    const bool new_vision_frame = apply_vision(vision, now_ms);
     s_status.grid_correction_active = false;
-    if (s_estimator.initialized && sensors->infrared_valid && vision->cell_mm > 0) {
-        float col = 0, row = 0, theta = 0;
-        if (match_grid(observed, vision->cell_mm, &col, &row, &theta)) {
-            const float distance = hypotf(col - s_estimator.col, row - s_estimator.row);
-            s_estimator.col = col;
-            s_estimator.row = row;
-            s_estimator.theta_deg = theta;
-            if (s_estimator.grid_ms && now_ms > s_estimator.grid_ms &&
-                s_status.motor_left > 0 && s_status.motor_right > 0) {
-                const float event_dt = (float)(now_ms - s_estimator.grid_ms) / 1000.0f;
-                if (event_dt > 0.01f && event_dt < 2.0f && distance / event_dt < 30.0f)
-                    s_estimator.speed_cells_s = 0.65f * s_estimator.speed_cells_s +
-                                                0.35f * distance / event_dt;
-            }
-            s_estimator.grid_ms = now_ms;
-            s_estimator.uncertainty_cells = fmaxf(0.2f, s_estimator.uncertainty_cells * 0.8f);
-            if (vision->pose_valid) {
-                const float sample = angle_error(theta, vision->theta_deg);
-                s_estimator.vision_heading_offset_deg = blend_angle(
-                    s_estimator.vision_heading_offset_deg, sample, 0.02f);
-            }
-            s_status.grid_correction_active = true;
-            s_status.last_correction = NAVIGATION_CORRECTION_GRID;
-        }
-    }
-    s_estimator.previous_pattern = observed;
     s_status.infrared_pattern = observed;
     s_status.infrared_calibrated_mask = calibration_mask();
     s_status.grid_calibrated = s_status.infrared_calibrated_mask == 0x0f;
+    return new_vision_frame;
+}
+
+static void mark_occupied(uint8_t cols, uint8_t rows, int center_col, int center_row, int radius)
+{
+    for (int row = center_row - radius; row <= center_row + radius; ++row) {
+        if (row < 0 || row >= rows) continue;
+        for (int col = center_col - radius; col <= center_col + radius; ++col) {
+            if (col < 0 || col >= cols) continue;
+            s_occupancy[row * cols + col] = 1;
+        }
+    }
+}
+
+static esp_err_t build_occupancy(const vision_status_t *vision)
+{
+    if (vision->grid_cols == 0 || vision->grid_rows == 0 ||
+        vision->grid_cols > GRID_PLANNER_MAX_DIM || vision->grid_rows > GRID_PLANNER_MAX_DIM)
+        return ESP_ERR_INVALID_SIZE;
+    const uint8_t cols = (uint8_t)vision->grid_cols;
+    const uint8_t rows = (uint8_t)vision->grid_rows;
+    memset(s_occupancy, 0, (size_t)cols * rows);
+    for (uint8_t row = 0; row < rows; ++row) {
+        for (uint8_t col = 0; col < cols; ++col) {
+            if (col < NAV_GRID_MARGIN_CELLS || row < NAV_GRID_MARGIN_CELLS ||
+                col >= cols - NAV_GRID_MARGIN_CELLS || row >= rows - NAV_GRID_MARGIN_CELLS)
+                s_occupancy[row * cols + col] = 1;
+        }
+    }
+    for (uint8_t i = 0; i < vision->obstacle_count; ++i) {
+        const vision_position_t *obstacle = &vision->obstacles[i];
+        if (obstacle->age_ms > VISION_FRESH_MS) continue;
+        mark_occupied(cols, rows, coordinate_cell(obstacle->col, cols),
+                      coordinate_cell(obstacle->row, rows), NAV_OBSTACLE_RADIUS_CELLS);
+    }
+    if (vision->peer_valid && vision->peer_age_ms <= VISION_FRESH_MS) {
+        mark_occupied(cols, rows, coordinate_cell(vision->peer_col, cols),
+                      coordinate_cell(vision->peer_row, rows), NAV_PEER_RADIUS_CELLS);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t append_segment(float start_col, float start_row, float end_col, float end_row)
+{
+    const int delta_col = sign_float(end_col - start_col);
+    const int delta_row = sign_float(end_row - start_row);
+    if (delta_col == 0 && delta_row == 0) return ESP_OK;
+    const uint8_t heading = direction_index(delta_col, delta_row);
+    if (s_route.segment_count > 0) {
+        route_segment_t *previous = &s_route.segments[s_route.segment_count - 1];
+        if (previous->delta_col == delta_col && previous->delta_row == delta_row &&
+            fabsf(previous->end_col - start_col) < 0.001f &&
+            fabsf(previous->end_row - start_row) < 0.001f) {
+            previous->end_col = end_col;
+            previous->end_row = end_row;
+            return ESP_OK;
+        }
+    }
+    if (s_route.segment_count >= NAV_MAX_SEGMENTS) return ESP_ERR_INVALID_SIZE;
+    s_route.segments[s_route.segment_count++] = (route_segment_t){
+        .start_col = start_col, .start_row = start_row,
+        .end_col = end_col, .end_row = end_row,
+        .delta_col = (int8_t)delta_col, .delta_row = (int8_t)delta_row,
+        .heading_index = heading,
+    };
+    return ESP_OK;
+}
+
+static esp_err_t append_queen_move(float start_col, float start_row,
+                                   float end_col, float end_row)
+{
+    const float dx = end_col - start_col;
+    const float dy = end_row - start_row;
+    const float diagonal = fminf(fabsf(dx), fabsf(dy));
+    float cursor_col = start_col;
+    float cursor_row = start_row;
+    esp_err_t err = ESP_OK;
+    if (diagonal > 0.001f) {
+        cursor_col += copysignf(diagonal, dx);
+        cursor_row += copysignf(diagonal, dy);
+        err = append_segment(start_col, start_row, cursor_col, cursor_row);
+    }
+    if (err == ESP_OK) err = append_segment(cursor_col, cursor_row, end_col, end_row);
+    return err;
+}
+
+static void publish_current_segment(void)
+{
+    s_status.route_segment_count = s_route.segment_count;
+    s_status.route_segment_index = s_route.segment_index;
+    if (!s_route.valid || s_route.segment_index >= s_route.segment_count) {
+        s_status.heading_index = 0;
+        s_status.desired_heading_deg = 0;
+        s_status.waypoint_col = s_estimator.col;
+        s_status.waypoint_row = s_estimator.row;
+        return;
+    }
+    const route_segment_t *segment = &s_route.segments[s_route.segment_index];
+    s_status.heading_index = segment->heading_index;
+    s_status.desired_heading_deg = direction_heading(segment->heading_index);
+    s_status.waypoint_col = segment->end_col;
+    s_status.waypoint_row = segment->end_row;
+}
+
+static esp_err_t plan_route_locked(const vision_status_t *vision, bool replanning)
+{
+    esp_err_t err = build_occupancy(vision);
+    if (err != ESP_OK) return err;
+    const uint8_t cols = (uint8_t)vision->grid_cols;
+    const uint8_t rows = (uint8_t)vision->grid_rows;
+    const grid_planner_cell_t start = {
+        .col = (uint8_t)(s_confirmed_cell_valid
+            ? s_status.confirmed_cell_col : coordinate_cell(s_estimator.col, cols)),
+        .row = (uint8_t)(s_confirmed_cell_valid
+            ? s_status.confirmed_cell_row : coordinate_cell(s_estimator.row, rows)),
+    };
+    const grid_planner_cell_t goal = {
+        .col = (uint8_t)coordinate_cell(s_status.col, cols),
+        .row = (uint8_t)coordinate_cell(s_status.row, rows),
+    };
+    s_occupancy[start.row * cols + start.col] = 0;
+    memset(&s_route, 0, sizeof(s_route));
+    err = grid_planner_plan(cols, rows, s_occupancy, start, goal, &s_route.cells);
+    if (err != ESP_OK) return err;
+    float cursor_col = s_estimator.col;
+    float cursor_row = s_estimator.row;
+    const float lattice_offset_col = cursor_col - start.col;
+    const float lattice_offset_row = cursor_row - start.row;
+    for (uint16_t i = 1; err == ESP_OK && i < s_route.cells.count; ++i) {
+        const float next_col = s_route.cells.cells[i].col + lattice_offset_col;
+        const float next_row = s_route.cells.cells[i].row + lattice_offset_row;
+        err = append_segment(cursor_col, cursor_row, next_col, next_row);
+        cursor_col = next_col;
+        cursor_row = next_row;
+    }
+    if (err == ESP_OK && hypotf(s_status.col - cursor_col, s_status.row - cursor_row) > ARRIVAL_CELLS)
+        err = append_queen_move(cursor_col, cursor_row, s_status.col, s_status.row);
+    if (err != ESP_OK) return err;
+    s_route.valid = true;
+    s_route.occupancy_frame_timestamp_ms = vision->frame_timestamp_ms;
+    s_status.confirmed_cell_col = start.col;
+    s_status.confirmed_cell_row = start.row;
+    s_confirmed_cell_valid = true;
+    s_confirmed_pattern = s_stable_pattern;
+    s_status.wait_reason = NAVIGATION_WAIT_NONE;
+    s_alignment_samples = s_misalignment_samples = s_arrival_samples = 0;
+    s_slow_pulse_ticks = 0;
+    if (replanning) ++s_status.replan_count;
+    publish_current_segment();
+    return ESP_OK;
+}
+
+static bool remaining_route_blocked(const vision_status_t *vision)
+{
+    if (!s_route.valid || build_occupancy(vision) != ESP_OK) return false;
+    const uint8_t cols = (uint8_t)vision->grid_cols;
+    for (uint16_t i = s_route.cell_index + 1; i < s_route.cells.count; ++i) {
+        const grid_planner_cell_t cell = s_route.cells.cells[i];
+        if (s_occupancy[cell.row * cols + cell.col]) return true;
+    }
+    return false;
+}
+
+static void update_confirmed_cell(const vision_status_t *vision, bool new_vision_frame)
+{
+    if (new_vision_frame) {
+        if (!vision->grid_cols || !vision->grid_rows) return;
+        s_status.confirmed_cell_col = stable_coordinate_cell(
+            vision->col, s_status.confirmed_cell_col, (uint8_t)vision->grid_cols);
+        s_status.confirmed_cell_row = stable_coordinate_cell(
+            vision->row, s_status.confirmed_cell_row, (uint8_t)vision->grid_rows);
+        s_confirmed_cell_valid = true;
+        s_status.crossings_without_vision = 0;
+        s_confirmed_pattern = s_stable_pattern;
+        if (!s_status.has_target || !s_route.valid) return;
+        for (uint16_t i = s_route.cell_index; i < s_route.cells.count; ++i) {
+            const grid_planner_cell_t cell = s_route.cells.cells[i];
+            if (cell.col == s_status.confirmed_cell_col &&
+                cell.row == s_status.confirmed_cell_row) {
+                s_route.cell_index = i;
+                break;
+            }
+        }
+        return;
+    }
+    if (!s_status.has_target || !s_route.valid) return;
+    const route_segment_t *segment = s_route.segment_index < s_route.segment_count
+        ? &s_route.segments[s_route.segment_index] : NULL;
+    if (segment == NULL || !s_status.grid_calibrated ||
+        s_stable_pattern_samples < IR_STABLE_SAMPLES || s_stable_pattern == 0 ||
+        s_stable_pattern == 0x0f || s_stable_pattern == s_confirmed_pattern) return;
+    const int candidate_col = stable_coordinate_cell(
+        s_estimator.col, s_status.confirmed_cell_col, (uint8_t)vision->grid_cols);
+    const int candidate_row = stable_coordinate_cell(
+        s_estimator.row, s_status.confirmed_cell_row, (uint8_t)vision->grid_rows);
+    const int delta_col = candidate_col - s_status.confirmed_cell_col;
+    const int delta_row = candidate_row - s_status.confirmed_cell_row;
+    if (delta_col != segment->delta_col || delta_row != segment->delta_row) return;
+    const uint8_t expected = expected_pattern(s_estimator.col, s_estimator.row,
+        direction_heading(segment->heading_index), vision->cell_mm);
+    if (expected != s_stable_pattern) return;
+    if (s_status.crossings_without_vision >= NAV_MAX_BLIND_CROSSINGS) {
+        s_status.phase = NAVIGATION_WAITING_FOR_VISION;
+        s_status.wait_reason = NAVIGATION_WAIT_VISION_LIMIT;
+        s_estimator.speed_cells_s = 0;
+        return;
+    }
+    s_status.confirmed_cell_col = (int16_t)candidate_col;
+    s_status.confirmed_cell_row = (int16_t)candidate_row;
+    ++s_status.crossings_without_vision;
+    s_confirmed_pattern = s_stable_pattern;
+    if (s_route.cell_index + 1 < s_route.cells.count) {
+        const grid_planner_cell_t next = s_route.cells.cells[s_route.cell_index + 1];
+        if (next.col == candidate_col && next.row == candidate_row) ++s_route.cell_index;
+    }
 }
 
 static void set_motors_locked(int left, int right)
@@ -277,7 +525,9 @@ static void set_motors_locked(int left, int right)
     if (err == ESP_OK) {
         s_status.motor_left = (int16_t)left;
         s_status.motor_right = (int16_t)right;
-        if ((left < 0 && right > 0) || (left > 0 && right < 0))
+        if (left == 0 && right == 0)
+            s_estimator.speed_cells_s = 0;
+        else if ((left < 0 && right > 0) || (left > 0 && right < 0))
             s_estimator.speed_cells_s *= 0.5f;
     } else {
         motor_adapter_stop();
@@ -295,9 +545,25 @@ static void finish_locked(navigation_phase_t phase, esp_err_t error)
     s_status.phase = phase;
     s_status.has_target = false;
     s_status.error = error;
+    s_route.valid = false;
+    memset(&s_route, 0, sizeof(s_route));
+    s_status.crossings_without_vision = 0;
+    s_status.wait_reason = NAVIGATION_WAIT_NONE;
+    s_slow_pulse_ticks = 0;
+    publish_current_segment();
 }
 
-static void update_controller(const rover_imu_state_t *imu, const rover_sensor_state_t *sensors)
+static void wait_for_vision_locked(navigation_wait_reason_t reason)
+{
+    set_motors_locked(0, 0);
+    s_estimator.speed_cells_s = 0;
+    s_slow_pulse_ticks = 0;
+    s_status.phase = NAVIGATION_WAITING_FOR_VISION;
+    s_status.wait_reason = reason;
+}
+
+static void update_controller(const rover_imu_state_t *imu, const rover_sensor_state_t *sensors,
+                              const vision_status_t *vision, bool new_vision_frame)
 {
     if (!s_status.has_target) return;
     if (app_mode_get() != APP_MODE_TEST) {
@@ -306,42 +572,185 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         return;
     }
     if (!s_estimator.initialized || !imu->valid || !imu->calibration_valid ||
-        !sensors->infrared_valid || !sensors->ultrasonic_valid ||
+        !sensors->infrared_valid ||
         s_estimator.uncertainty_cells > UNCERTAINTY_LIMIT_CELLS) {
         finish_locked(NAVIGATION_ERROR, ESP_ERR_INVALID_RESPONSE);
         return;
     }
-    if (sensors->ultrasonic_valid && sensors->distance_mm <= OBSTACLE_MM) {
-        if (s_obstacle_samples < UINT8_MAX) ++s_obstacle_samples;
-    } else s_obstacle_samples = 0;
+    const bool new_ultrasonic_sample = sensors->timestamp_ms != s_ultrasonic_sample_ms;
+    if (!sensors->ultrasonic_valid) {
+        set_motors_locked(0, 0);
+        s_slow_pulse_ticks = 0;
+        if (new_ultrasonic_sample) {
+            s_ultrasonic_sample_ms = sensors->timestamp_ms;
+            if (s_ultrasonic_invalid_samples < UINT8_MAX) ++s_ultrasonic_invalid_samples;
+        }
+        if (s_ultrasonic_invalid_samples >= SENSOR_INVALID_SAMPLES)
+            finish_locked(NAVIGATION_ERROR, ESP_ERR_INVALID_RESPONSE);
+        return;
+    }
+    if (new_ultrasonic_sample) {
+        s_ultrasonic_sample_ms = sensors->timestamp_ms;
+        s_ultrasonic_invalid_samples = 0;
+        if (sensors->distance_mm <= OBSTACLE_MM) {
+            if (s_obstacle_samples < UINT8_MAX) ++s_obstacle_samples;
+        } else {
+            s_obstacle_samples = 0;
+        }
+    }
+    if (s_status.phase == NAVIGATION_WAITING_FOR_VISION) {
+        set_motors_locked(0, 0);
+        if (!new_vision_frame || !vision->pose_valid) return;
+        s_status.phase = NAVIGATION_REPLANNING;
+        const esp_err_t plan_error = plan_route_locked(vision, true);
+        if (plan_error != ESP_OK) {
+            finish_locked(plan_error == ESP_ERR_NOT_FOUND ? NAVIGATION_BLOCKED : NAVIGATION_ERROR,
+                          plan_error);
+            return;
+        }
+        s_status.phase = NAVIGATION_TURNING;
+    }
+    if (!vision->pose_valid && !s_status.grid_calibrated) {
+        wait_for_vision_locked(NAVIGATION_WAIT_GRID_UNCALIBRATED);
+        return;
+    }
+    if (!s_route.valid) {
+        s_status.phase = NAVIGATION_PLANNING;
+        const esp_err_t plan_error = plan_route_locked(vision, false);
+        if (plan_error != ESP_OK) {
+            finish_locked(plan_error == ESP_ERR_NOT_FOUND ? NAVIGATION_BLOCKED : NAVIGATION_ERROR,
+                          plan_error);
+            return;
+        }
+        s_status.phase = NAVIGATION_TURNING;
+    } else if (new_vision_frame && remaining_route_blocked(vision)) {
+        set_motors_locked(0, 0);
+        s_status.phase = NAVIGATION_REPLANNING;
+        s_status.wait_reason = NAVIGATION_WAIT_PATH_OCCUPIED;
+        const esp_err_t plan_error = plan_route_locked(vision, true);
+        if (plan_error != ESP_OK) {
+            finish_locked(plan_error == ESP_ERR_NOT_FOUND ? NAVIGATION_BLOCKED : NAVIGATION_ERROR,
+                          plan_error);
+            return;
+        }
+        s_status.phase = NAVIGATION_TURNING;
+    }
     if (s_obstacle_samples >= OBSTACLE_SAMPLES) {
         finish_locked(NAVIGATION_BLOCKED, ESP_ERR_INVALID_STATE);
         return;
     }
-    const float dx = s_status.col - s_estimator.col;
-    const float dy = s_status.row - s_estimator.row;
-    const float distance = hypotf(dx, dy);
-    if (distance <= ARRIVAL_CELLS) {
+    if (s_status.phase == NAVIGATION_WAITING_FOR_VISION) {
         set_motors_locked(0, 0);
-        if (++s_arrival_samples >= ARRIVAL_SAMPLES) finish_locked(NAVIGATION_ARRIVED, ESP_OK);
+        return;
+    }
+    if (s_route.segment_index >= s_route.segment_count) {
+        const float target_distance = hypotf(s_status.col - s_estimator.col,
+                                             s_status.row - s_estimator.row);
+        const float observed_speed = fabsf(s_estimator.speed_cells_s);
+        set_motors_locked(0, 0);
+        s_slow_pulse_ticks = 0;
+        if (!new_vision_frame) return;
+        if (target_distance <= ARRIVAL_CELLS &&
+            observed_speed <= ARRIVAL_MAX_SPEED_CELLS_S) {
+            if (s_arrival_samples < UINT8_MAX) ++s_arrival_samples;
+            if (s_arrival_samples >= ARRIVAL_SAMPLES)
+                finish_locked(NAVIGATION_ARRIVED, ESP_OK);
+        } else {
+            s_arrival_samples = 0;
+            if (target_distance > ARRIVAL_CELLS) {
+                s_route.valid = false;
+                s_status.phase = NAVIGATION_REPLANNING;
+            }
+        }
+        return;
+    }
+    route_segment_t *segment = &s_route.segments[s_route.segment_index];
+    const float dx = segment->end_col - s_estimator.col;
+    const float dy = segment->end_row - s_estimator.row;
+    const float distance = hypotf(dx, dy);
+    const float segment_dx = segment->end_col - segment->start_col;
+    const float segment_dy = segment->end_row - segment->start_row;
+    const float segment_length = hypotf(segment_dx, segment_dy);
+    const float traveled_dx = s_estimator.col - segment->start_col;
+    const float traveled_dy = s_estimator.row - segment->start_row;
+    const float along = segment_length > 0
+        ? (traveled_dx * segment_dx + traveled_dy * segment_dy) / segment_length : 0;
+    const float cross = segment_length > 0
+        ? fabsf(traveled_dx * segment_dy - traveled_dy * segment_dx) / segment_length : 0;
+    const bool final_segment = s_route.segment_index + 1 >= s_route.segment_count;
+    if ((final_segment && along > segment_length + ARRIVAL_CELLS) || cross > 0.75f) {
+        set_motors_locked(0, 0);
+        s_slow_pulse_ticks = 0;
+        s_route.valid = false;
+        s_status.phase = NAVIGATION_REPLANNING;
+        return;
+    }
+    const bool waypoint_reached = distance <= ARRIVAL_CELLS ||
+        (!final_segment && along >= segment_length && cross <= 0.5f);
+    if (waypoint_reached) {
+        if (final_segment) {
+            const float observed_speed = fabsf(s_estimator.speed_cells_s);
+            set_motors_locked(0, 0);
+            s_slow_pulse_ticks = 0;
+            if (!new_vision_frame) return;
+            if (observed_speed > ARRIVAL_MAX_SPEED_CELLS_S) {
+                s_arrival_samples = 0;
+                return;
+            }
+            if (s_arrival_samples < UINT8_MAX) ++s_arrival_samples;
+            if (s_arrival_samples >= ARRIVAL_SAMPLES)
+                finish_locked(NAVIGATION_ARRIVED, ESP_OK);
+            return;
+        }
+        ++s_route.segment_index;
+        s_alignment_samples = s_misalignment_samples = s_arrival_samples = 0;
+        s_slow_pulse_ticks = 0;
+        s_status.phase = NAVIGATION_TURNING;
+        publish_current_segment();
         return;
     }
     s_arrival_samples = 0;
-    const float target_heading = atan2f(-dy, dx) * 180.0f / (float)M_PI;
+    const float target_heading = direction_heading(segment->heading_index);
     const float error = angle_error(target_heading, s_estimator.theta_deg);
-    if (s_status.phase == NAVIGATION_DRIVING && fabsf(error) > RETURN_TURN_DEG)
-        s_status.phase = NAVIGATION_TURNING;
-    if (s_status.phase != NAVIGATION_DRIVING && fabsf(error) <= ENTER_DRIVE_DEG)
-        s_status.phase = NAVIGATION_DRIVING;
+    if (s_status.phase == NAVIGATION_DRIVING) {
+        if (fabsf(error) > RETURN_TURN_DEG) {
+            if (++s_misalignment_samples >= MISALIGNMENT_SAMPLES) {
+                s_status.phase = NAVIGATION_TURNING;
+                s_alignment_samples = s_misalignment_samples = 0;
+                s_slow_pulse_ticks = 0;
+            }
+        } else s_misalignment_samples = 0;
+    } else if (fabsf(error) <= ENTER_DRIVE_DEG) {
+        if (++s_alignment_samples >= ALIGNMENT_SAMPLES) {
+            s_status.phase = NAVIGATION_DRIVING;
+            s_alignment_samples = s_misalignment_samples = 0;
+        }
+    } else s_alignment_samples = 0;
     if (s_status.phase == NAVIGATION_DRIVING) {
         const int base = distance <= SLOW_DISTANCE_CELLS ? SLOW_PWM : DRIVE_PWM;
         int correction = (int)lroundf(error * 8.0f);
         correction = correction > 150 ? 150 : (correction < -150 ? -150 : correction);
+        if (distance <= SLOW_DISTANCE_CELLS) {
+            if (new_vision_frame && s_slow_pulse_ticks == 0)
+                s_slow_pulse_ticks = SLOW_PULSE_CONTROL_TICKS;
+            if (s_slow_pulse_ticks == 0) {
+                set_motors_locked(0, 0);
+                return;
+            }
+            --s_slow_pulse_ticks;
+        } else {
+            s_slow_pulse_ticks = 0;
+        }
         set_motors_locked(base - correction, base + correction);
     } else {
         s_status.phase = NAVIGATION_TURNING;
-        set_motors_locked(error > 0 ? -TURN_PWM : TURN_PWM,
-                          error > 0 ? TURN_PWM : -TURN_PWM);
+        s_slow_pulse_ticks = 0;
+        if (fabsf(error) <= ENTER_DRIVE_DEG) {
+            set_motors_locked(0, 0);
+        } else {
+            set_motors_locked(error > 0 ? -TURN_PWM : TURN_PWM,
+                              error > 0 ? TURN_PWM : -TURN_PWM);
+        }
     }
 }
 
@@ -369,6 +778,7 @@ static void navigation_task(void *argument)
     TickType_t wake = xTaskGetTickCount();
     uint64_t previous_ms = (uint64_t)(esp_timer_get_time() / 1000);
     bool control_tick = false;
+    bool pending_vision_frame = false;
     while (true) {
         rover_imu_state_t imu = {0};
         rover_sensor_state_t sensors = {0};
@@ -380,10 +790,15 @@ static void navigation_task(void *argument)
         float dt = (float)(now_ms - previous_ms) / 1000.0f;
         if (dt <= 0 || dt > 0.1f) dt = 0.01f;
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        update_estimator(&imu, &sensors, &vision, dt, now_ms);
+        const bool new_vision_frame = update_estimator(&imu, &sensors, &vision, dt, now_ms);
+        pending_vision_frame |= new_vision_frame;
         publish_status(&vision);
+        update_confirmed_cell(&vision, new_vision_frame);
         control_tick = !control_tick;
-        if (control_tick) update_controller(&imu, &sensors);
+        if (control_tick) {
+            update_controller(&imu, &sensors, &vision, pending_vision_frame);
+            pending_vision_frame = false;
+        }
         xSemaphoreGive(s_lock);
         previous_ms = now_ms;
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(NAV_PERIOD_MS));
@@ -411,7 +826,7 @@ esp_err_t navigation_service_submit(float col, float row, uint32_t *request_id)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (!s_estimator.initialized || !vision.connected || !vision.protocol_valid ||
         !vision.pose_valid || !vision.grid_cols || !vision.grid_rows || !imu.valid ||
-        !imu.calibration_valid || !sensors.infrared_valid || !sensors.ultrasonic_valid) {
+        !imu.calibration_valid || !sensors.infrared_valid) {
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
@@ -419,14 +834,25 @@ esp_err_t navigation_service_submit(float col, float row, uint32_t *request_id)
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_status.has_target) motor_adapter_stop();
+    if (s_status.has_target) {
+        motor_adapter_stop();
+        s_status.cancel_reason = NAVIGATION_CANCEL_REPLACED;
+    }
     s_status.col = col;
     s_status.row = row;
     s_status.request_id = ++s_next_request;
     s_status.has_target = true;
-    s_status.phase = NAVIGATION_TURNING;
+    s_status.phase = NAVIGATION_PLANNING;
     s_status.error = ESP_OK;
-    s_arrival_samples = s_obstacle_samples = 0;
+    s_status.wait_reason = NAVIGATION_WAIT_NONE;
+    s_status.crossings_without_vision = 0;
+    s_status.replan_count = 0;
+    s_status.route_segment_count = s_status.route_segment_index = 0;
+    memset(&s_route, 0, sizeof(s_route));
+    s_arrival_samples = s_obstacle_samples = s_ultrasonic_invalid_samples = 0;
+    s_ultrasonic_sample_ms = sensors.timestamp_ms;
+    s_alignment_samples = s_misalignment_samples = 0;
+    s_slow_pulse_ticks = 0;
     const uint32_t id = s_status.request_id;
     xSemaphoreGive(s_lock);
     if (request_id != NULL) *request_id = id;
@@ -444,7 +870,13 @@ esp_err_t navigation_service_cancel(navigation_cancel_reason_t reason)
     s_status.phase = NAVIGATION_CANCELLED;
     s_status.cancel_reason = reason;
     s_status.error = ESP_OK;
-    s_arrival_samples = s_obstacle_samples = 0;
+    s_status.wait_reason = NAVIGATION_WAIT_NONE;
+    s_route.valid = false;
+    memset(&s_route, 0, sizeof(s_route));
+    s_status.crossings_without_vision = 0;
+    publish_current_segment();
+    s_arrival_samples = s_obstacle_samples = s_ultrasonic_invalid_samples = 0;
+    s_slow_pulse_ticks = 0;
     xSemaphoreGive(s_lock);
     return ESP_OK;
 }

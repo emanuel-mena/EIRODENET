@@ -13,6 +13,9 @@ typedef enum {
     NAVIGATION_BLOCKED,
     NAVIGATION_CANCELLED,
     NAVIGATION_ERROR,
+    NAVIGATION_PLANNING,
+    NAVIGATION_REPLANNING,
+    NAVIGATION_WAITING_FOR_VISION,
 } navigation_phase_t;
 
 typedef enum {
@@ -28,6 +31,13 @@ typedef enum {
     NAVIGATION_CORRECTION_GRID,
     NAVIGATION_CORRECTION_VISION,
 } navigation_correction_t;
+
+typedef enum {
+    NAVIGATION_WAIT_NONE = 0,
+    NAVIGATION_WAIT_VISION_LIMIT,
+    NAVIGATION_WAIT_GRID_UNCALIBRATED,
+    NAVIGATION_WAIT_PATH_OCCUPIED,
+} navigation_wait_reason_t;
 
 typedef struct {
     navigation_phase_t phase;
@@ -53,6 +63,17 @@ typedef struct {
     uint8_t infrared_pattern;
     uint8_t infrared_calibrated_mask;
     navigation_correction_t last_correction;
+    int16_t confirmed_cell_col;
+    int16_t confirmed_cell_row;
+    uint8_t heading_index;
+    float desired_heading_deg;
+    float waypoint_col;
+    float waypoint_row;
+    uint16_t route_segment_count;
+    uint16_t route_segment_index;
+    uint8_t crossings_without_vision;
+    uint32_t replan_count;
+    navigation_wait_reason_t wait_reason;
     int16_t motor_left;
     int16_t motor_right;
     navigation_cancel_reason_t cancel_reason;

@@ -18,7 +18,7 @@
 #include "rover_service.h"
 
 #define PEER_MAGIC 0x524f4952U
-#define PEER_PROTOCOL_VERSION 2U
+#define PEER_PROTOCOL_VERSION 3U
 #define PEER_STATE_PERIOD_MS 200U
 #define PEER_TIMEOUT_MS 1500U
 
@@ -42,6 +42,17 @@ typedef struct {
     float navigation_col;
     float navigation_row;
     uint32_t navigation_request_id;
+    int16_t navigation_cell_col;
+    int16_t navigation_cell_row;
+    uint8_t navigation_heading_index;
+    uint8_t navigation_blind_crossings;
+    uint8_t navigation_wait_reason;
+    float navigation_heading_deg;
+    float navigation_waypoint_col;
+    float navigation_waypoint_row;
+    uint16_t navigation_segment_count;
+    uint16_t navigation_segment_index;
+    uint32_t navigation_replans;
     int16_t drive_left;
     int16_t drive_right;
 } peer_state_payload_t;
@@ -146,6 +157,17 @@ static void send_local_state(void)
     state->navigation_col = navigation.col;
     state->navigation_row = navigation.row;
     state->navigation_request_id = navigation.request_id;
+    state->navigation_cell_col = navigation.confirmed_cell_col;
+    state->navigation_cell_row = navigation.confirmed_cell_row;
+    state->navigation_heading_index = navigation.heading_index;
+    state->navigation_heading_deg = navigation.desired_heading_deg;
+    state->navigation_waypoint_col = navigation.waypoint_col;
+    state->navigation_waypoint_row = navigation.waypoint_row;
+    state->navigation_segment_count = navigation.route_segment_count;
+    state->navigation_segment_index = navigation.route_segment_index;
+    state->navigation_blind_crossings = navigation.crossings_without_vision;
+    state->navigation_replans = navigation.replan_count;
+    state->navigation_wait_reason = (uint8_t)navigation.wait_reason;
     state->drive_left = drive.left;
     state->drive_right = drive.right;
     send_packet(&packet);
@@ -174,6 +196,17 @@ static void accept_state(const peer_packet_t *packet)
     s_status.navigation_col = state->navigation_col;
     s_status.navigation_row = state->navigation_row;
     s_status.navigation_request_id = state->navigation_request_id;
+    s_status.navigation_cell_col = state->navigation_cell_col;
+    s_status.navigation_cell_row = state->navigation_cell_row;
+    s_status.navigation_heading_index = state->navigation_heading_index;
+    s_status.navigation_heading_deg = state->navigation_heading_deg;
+    s_status.navigation_waypoint_col = state->navigation_waypoint_col;
+    s_status.navigation_waypoint_row = state->navigation_waypoint_row;
+    s_status.navigation_segment_count = state->navigation_segment_count;
+    s_status.navigation_segment_index = state->navigation_segment_index;
+    s_status.navigation_blind_crossings = state->navigation_blind_crossings;
+    s_status.navigation_replans = state->navigation_replans;
+    s_status.navigation_wait_reason = state->navigation_wait_reason;
     s_status.drive_left = state->drive_left;
     s_status.drive_right = state->drive_right;
     s_last_seen_ms = esp_timer_get_time() / 1000;

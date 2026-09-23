@@ -82,6 +82,9 @@ static const char *navigation_phase_name(navigation_phase_t phase)
         case NAVIGATION_BLOCKED: return "blocked";
         case NAVIGATION_CANCELLED: return "cancelled";
         case NAVIGATION_ERROR: return "error";
+        case NAVIGATION_PLANNING: return "planning";
+        case NAVIGATION_REPLANNING: return "replanning";
+        case NAVIGATION_WAITING_FOR_VISION: return "waiting_for_vision";
         default: return "unknown";
     }
 }
@@ -157,7 +160,7 @@ static esp_err_t state_handler(httpd_req_t *request)
     cJSON *nav_json = cJSON_AddObjectToObject(root, "navigation");
     cJSON_AddNumberToObject(nav_json, "phase", navigation.phase);
     cJSON_AddStringToObject(nav_json, "phase_name", navigation_phase_name(navigation.phase));
-    cJSON_AddStringToObject(nav_json, "implementation", "fused-grid-v1");
+    cJSON_AddStringToObject(nav_json, "implementation", "grid-a-star-v2");
     cJSON_AddNumberToObject(nav_json, "core", navigation.core_id);
     cJSON_AddBoolToObject(nav_json, "has_target", navigation.has_target);
     cJSON_AddNumberToObject(nav_json, "col", navigation.col);
@@ -186,6 +189,19 @@ static esp_err_t state_handler(httpd_req_t *request)
     cJSON_AddNumberToObject(grid_json, "pattern", navigation.infrared_pattern);
     cJSON_AddNumberToObject(grid_json, "calibrated_mask", navigation.infrared_calibrated_mask);
     cJSON_AddNumberToObject(grid_json, "last_correction", navigation.last_correction);
+    cJSON *route_json = cJSON_AddObjectToObject(nav_json, "route");
+    cJSON_AddNumberToObject(route_json, "cell_col", navigation.confirmed_cell_col);
+    cJSON_AddNumberToObject(route_json, "cell_row", navigation.confirmed_cell_row);
+    cJSON_AddNumberToObject(route_json, "heading_index", navigation.heading_index);
+    cJSON_AddNumberToObject(route_json, "heading_deg", navigation.desired_heading_deg);
+    cJSON_AddNumberToObject(route_json, "waypoint_col", navigation.waypoint_col);
+    cJSON_AddNumberToObject(route_json, "waypoint_row", navigation.waypoint_row);
+    cJSON_AddNumberToObject(route_json, "segment_count", navigation.route_segment_count);
+    cJSON_AddNumberToObject(route_json, "segment_index", navigation.route_segment_index);
+    cJSON_AddNumberToObject(route_json, "blind_crossings",
+                            navigation.crossings_without_vision);
+    cJSON_AddNumberToObject(route_json, "replans", navigation.replan_count);
+    cJSON_AddNumberToObject(route_json, "wait_reason", navigation.wait_reason);
     cJSON *nav_motors = cJSON_AddObjectToObject(nav_json, "motors");
     cJSON_AddNumberToObject(nav_motors, "left", navigation.motor_left);
     cJSON_AddNumberToObject(nav_motors, "right", navigation.motor_right);
@@ -251,12 +267,26 @@ static esp_err_t peer_state_handler(httpd_req_t *request)
     cJSON_AddStringToObject(network, "peer_mac", mac);
     cJSON *navigation = cJSON_AddObjectToObject(root, "navigation");
     cJSON_AddNumberToObject(navigation, "phase", peer.navigation_phase);
-    cJSON_AddStringToObject(navigation, "implementation", "fused-grid-v1");
+    cJSON_AddStringToObject(navigation, "phase_name",
+                            navigation_phase_name((navigation_phase_t)peer.navigation_phase));
+    cJSON_AddStringToObject(navigation, "implementation", "grid-a-star-v2");
     cJSON_AddNumberToObject(navigation, "core", 1);
     cJSON_AddBoolToObject(navigation, "has_target", peer.navigation_has_target);
     cJSON_AddNumberToObject(navigation, "col", peer.navigation_col);
     cJSON_AddNumberToObject(navigation, "row", peer.navigation_row);
     cJSON_AddNumberToObject(navigation, "request_id", peer.navigation_request_id);
+    cJSON *route = cJSON_AddObjectToObject(navigation, "route");
+    cJSON_AddNumberToObject(route, "cell_col", peer.navigation_cell_col);
+    cJSON_AddNumberToObject(route, "cell_row", peer.navigation_cell_row);
+    cJSON_AddNumberToObject(route, "heading_index", peer.navigation_heading_index);
+    cJSON_AddNumberToObject(route, "heading_deg", peer.navigation_heading_deg);
+    cJSON_AddNumberToObject(route, "waypoint_col", peer.navigation_waypoint_col);
+    cJSON_AddNumberToObject(route, "waypoint_row", peer.navigation_waypoint_row);
+    cJSON_AddNumberToObject(route, "segment_count", peer.navigation_segment_count);
+    cJSON_AddNumberToObject(route, "segment_index", peer.navigation_segment_index);
+    cJSON_AddNumberToObject(route, "blind_crossings", peer.navigation_blind_crossings);
+    cJSON_AddNumberToObject(route, "replans", peer.navigation_replans);
+    cJSON_AddNumberToObject(route, "wait_reason", peer.navigation_wait_reason);
     cJSON *drive = cJSON_AddObjectToObject(root, "drive");
     cJSON_AddNumberToObject(drive, "left", peer.drive_left);
     cJSON_AddNumberToObject(drive, "right", peer.drive_right);
@@ -322,7 +352,7 @@ static esp_err_t target_handler(httpd_req_t *request)
     cJSON *response = cJSON_CreateObject();
     cJSON_AddBoolToObject(response, "ok", true);
     cJSON_AddNumberToObject(response, "request_id", request_id);
-    cJSON_AddStringToObject(response, "implementation", "fused-grid-v1");
+    cJSON_AddStringToObject(response, "implementation", "grid-a-star-v2");
     return send_json(request, response);
 }
 

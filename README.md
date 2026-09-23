@@ -281,28 +281,41 @@ npm run dev
 La página sólo se conecta por HTTP al rover que la sirve, sin asumir nombres como
 `rover-10.local` o `rover-11.local`. Ese rover expone su propio estado y actúa como
 puente hacia el compañero mediante ESP-NOW y la MAC guardada en `peer_mac`. Ambos
-rovers publican un paquete binario de estado cada 200 ms; tras 1500 ms sin paquetes,
+rovers publican un paquete binario de estado ESP-NOW v3 cada 200 ms, incluida la
+ruta discreta; tras 1500 ms sin paquetes,
 el panel del compañero se marca desconectado y bloquea telemetría y comandos. Por
 eso se puede abrir, por ejemplo, `http://cecilio.local` y operar ambos paneles sin
 que el navegador conozca la URL o IP del segundo rover.
 
 En modo prueba la web muestra IMU, sensores, red, la pose fusionada y una flecha 3D
-de Three.js. Permite control diferencial directo y acepta objetivos `(col, row)`
-para navegación punto a punto. Los comandos destinados al compañero atraviesan ESP-NOW y se validan
+de Three.js. Permite control diferencial directo y acepta objetivos decimales `(col, row)`
+para navegación sobre una ruta A* de ocho direcciones. Los comandos destinados al compañero atraviesan ESP-NOW y se validan
 otra vez en el rover receptor. En modo competencia los controles manuales quedan
 deshabilitados.
 
 La navegación exige primero una pose v2 fresca del servidor configurado, una IMU
-calibrada y lecturas válidas de infrarrojos y ultrasónico. Si falta cualquiera de
-estas precondiciones, la API rechaza el objetivo sin activar los motores. Después
-predice a 100 Hz con el giroscopio y usa los cuatro TCRT5000 como encoder sobre la
-cuadrícula de 20 mm; aprende automáticamente los dos niveles de cada sensor y su
-polaridad. Las retransmisiones con el mismo `ts_ms` no se vuelven a fusionar como si
+calibrada y una lectura válida de infrarrojos. Si falta cualquiera de estas
+precondiciones, la API rechaza el objetivo sin activar los motores. Un objetivo puede
+quedar aceptado durante un timeout ultrasónico, pero los motores permanecen detenidos
+hasta recuperar una lectura válida. Después
+predice a 100 Hz con el giroscopio y usa los cuatro TCRT5000 para confirmar cruces sobre la
+cuadrícula cuyo `cell_mm` publica visión; aprende automáticamente los dos niveles de cada sensor y su
+polaridad, pero un patrón infrarrojo nunca sustituye directamente la pose continua. Las
+retransmisiones con el mismo `ts_ms` no se vuelven a fusionar como si
 fueran capturas nuevas y la pose caduca después de 750 ms sin una captura nueva.
-Patrones ambiguos no corrigen la pose. Si cae la visión continúa de forma local y
-publica incertidumbre; un obstáculo ultrasónico a 150 mm, un fallo de IMU/IR, la
-pérdida del ultrasónico, un cambio de modo o un mando manual detienen y cancelan el
-movimiento. Se puede detener explícitamente con `POST /api/v1/navigation/cancel`.
+Patrones ambiguos no corrigen la pose. El planificador evita obstáculos visuales y al
+otro rover, mantiene rumbos múltiplos de 45 grados y no corta esquinas bloqueadas. Si
+cae la visión continúa como máximo dos cruces confirmados con la cuadrícula calibrada;
+después se detiene y replantea al recuperar una captura. La celda visual usa 0.12
+celdas de histéresis en cada frontera y la ruta conserva el desplazamiento fraccional
+inicial, por lo que no ordena ir al centro antes de comenzar A*. Dentro de tres
+celdas del waypoint el avance se aplica en pulsos de 40 ms sincronizados con capturas
+nuevas, y la llegada exige cinco capturas frescas dentro de 0.4 celdas con velocidad
+menor o igual a 0.35 celdas/s. Un obstáculo
+ultrasónico a 150 mm, un fallo de IMU/IR, tres lecturas ultrasónicas inválidas
+consecutivas, un cambio de modo o un mando manual detienen y cancelan el movimiento;
+una lectura ultrasónica inválida aislada sólo lo pausa. Se puede detener explícitamente
+con `POST /api/v1/navigation/cancel`.
 
 El firmware siempre inicia en modo prueba. Una pulsación de BOOT alterna entre
 prueba y competencia y detiene los motores. GPIO2 pulsa en azul durante prueba; en

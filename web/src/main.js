@@ -35,7 +35,7 @@ function roverCard(id) {
       <section class="controls"><div><p class="section-label">CONTROL DIRECTO</p><div class="dpad">
         <button data-drive="forward" aria-label="Avanzar">↑</button><button data-drive="left" aria-label="Girar izquierda">←</button><button data-drive="stop" class="stop" aria-label="Detener">■</button><button data-drive="right" aria-label="Girar derecha">→</button><button data-drive="back" aria-label="Retroceder">↓</button>
       </div><small class="hint">Mantén presionado · parada automática en 500 ms</small></div>
-      <form class="target-form"><p class="section-label">OBJETIVO DE NAVEGACIÓN</p><div><label>Col <input name="col" type="number" min="0" step="0.1" required></label><label>Fila <input name="row" type="number" min="0" step="0.1" required></label></div><button type="submit">Navegar al punto</button><button type="button" class="cancel-navigation">Cancelar y detener</button><small class="nav-state">Esperando pose de visión</small><div class="nav-telemetry"><span data-nav="pose">Pose —</span><span data-nav="speed">Velocidad —</span><span data-nav="vision">Visión —</span><span data-nav="grid">Cuadrícula —</span></div></form></section>
+      <form class="target-form"><p class="section-label">OBJETIVO DE NAVEGACIÓN</p><div><label>Col <input name="col" type="number" min="0" step="0.1" required></label><label>Fila <input name="row" type="number" min="0" step="0.1" required></label></div><button type="submit">Navegar al punto</button><button type="button" class="cancel-navigation">Cancelar y detener</button><small class="nav-state">Esperando pose de visión</small><div class="nav-telemetry"><span data-nav="pose">Pose —</span><span data-nav="speed">Velocidad —</span><span data-nav="vision">Visión —</span><span data-nav="grid">Cuadrícula —</span><span data-nav="route">Ruta —</span><span data-nav="waypoint">Waypoint —</span></div></form></section>
     </fieldset></article>`
 }
 
@@ -124,7 +124,7 @@ function updateRover(rover, data) {
   setText(e, 'ir-rear', data.sensors.infrared.valid ? `${data.sensors.infrared.rear_left} / ${data.sensors.infrared.rear_right}` : '— / —')
   setText(e, 'color', data.sensors.color.valid ? `${data.sensors.color.red} / ${data.sensors.color.green} / ${data.sensors.color.blue}` : `error ${data.sensors.color.error ?? '—'}`)
   e.querySelectorAll('.controls button, .controls input').forEach(control => { control.disabled = competition })
-  const nav = data.navigation; const pose = nav.pose || {}; const vision = nav.vision || {}; const grid = nav.grid_encoder || {}
+  const nav = data.navigation; const pose = nav.pose || {}; const vision = nav.vision || {}; const grid = nav.grid_encoder || {}; const route = nav.route || {}
   e.querySelector('.nav-state').textContent = nav.has_target
     ? `${nav.phase_name} #${nav.request_id} → (${nav.col.toFixed(1)}, ${nav.row.toFixed(1)})`
     : `${nav.phase_name || 'idle'} · error ${nav.error || 0}`
@@ -132,6 +132,12 @@ function updateRover(rover, data) {
   e.querySelector('[data-nav="speed"]').textContent = pose.valid ? `v ${pose.speed_cells_s.toFixed(2)} cel/s · ±${pose.uncertainty_cells.toFixed(2)} cel` : 'Velocidad —'
   e.querySelector('[data-nav="vision"]').textContent = vision.fresh ? `Visión fresca · ${vision.age_ms} ms` : (vision.connected ? 'Visión sin pose fresca' : 'Visión desconectada · local')
   e.querySelector('[data-nav="grid"]').textContent = grid.calibrated ? `Grid 0b${Number(grid.pattern).toString(2).padStart(4, '0')} · listo` : `Grid calibrando · máscara 0x${Number(grid.calibrated_mask || 0).toString(16)}`
+  e.querySelector('[data-nav="route"]').textContent = Number.isFinite(route.cell_col)
+    ? `Celda ${route.cell_col},${route.cell_row} · rumbo ${Number(route.heading_deg || 0).toFixed(0)}° · tramo ${route.segment_count ? Number(route.segment_index || 0) + 1 : 0}/${route.segment_count || 0}`
+    : 'Ruta —'
+  e.querySelector('[data-nav="waypoint"]').textContent = Number.isFinite(route.waypoint_col)
+    ? `WP ${route.waypoint_col.toFixed(2)},${route.waypoint_row.toFixed(2)} · sin visión ${route.blind_crossings || 0}/2 · replans ${route.replans || 0}`
+    : 'Waypoint —'
 }
 function setText(element, sensor, value) { element.querySelector(`[data-sensor="${sensor}"]`).textContent = value }
 
