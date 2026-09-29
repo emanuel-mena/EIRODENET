@@ -315,6 +315,22 @@ esp_err_t rover_service_get_wifi(internet_adapter_status_t *status)
     return internet_adapter_get_status(status);
 }
 
+esp_err_t rover_service_request_wifi_reconnect(void)
+{
+    if (s_lock == NULL) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_reconnecting) {
+        xSemaphoreGive(s_lock);
+        return ESP_OK;
+    }
+    s_reconnecting = true;
+    const BaseType_t created = xTaskCreate(reconnect_task, "wifi_reconnect", 4096,
+                                           NULL, 4, NULL);
+    if (created != pdPASS) s_reconnecting = false;
+    xSemaphoreGive(s_lock);
+    return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
 void rover_service_get_network_activity(bool *reconnecting, esp_err_t *last_error)
 {
     if (reconnecting == NULL || last_error == NULL) return;

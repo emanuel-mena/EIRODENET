@@ -67,7 +67,7 @@ resistencias pull-up/pull-down internas.
 | Modos | `app_mode.h` | Cambio con BOOT e indicador NeoPixel de prueba/competencia |
 | Navegación | `navigation_service.h` | Fusión visión/IMU/cuadrícula y control punto a punto en núcleo 1 |
 | Control manual | `manual_control_service.h` | Comandos web con parada de seguridad a 500 ms |
-| Competencia | `competition_service.h` | Punto de extensión del algoritmo autónomo v2 |
+| Competencia | `competition_service.h` | Verificación de red, identidad y función antes de la estrategia autónoma |
 | Comunicación par | `peer_comms_service.h` | Telemetría y comandos entre rovers mediante ESP-NOW |
 
 Todas las APIs públicas incluyen documentación JavaDoc/Doxygen con parámetros,
@@ -281,11 +281,34 @@ npm run dev
 La página sólo se conecta por HTTP al rover que la sirve, sin asumir nombres como
 `rover-10.local` o `rover-11.local`. Ese rover expone su propio estado y actúa como
 puente hacia el compañero mediante ESP-NOW y la MAC guardada en `peer_mac`. Ambos
-rovers publican un paquete binario de estado ESP-NOW v3 cada 200 ms, incluida la
+rovers publican un paquete binario de estado ESP-NOW v4 cada 200 ms, incluida la
 ruta discreta; tras 1500 ms sin paquetes,
 el panel del compañero se marca desconectado y bloquea telemetría y comandos. Por
 eso se puede abrir, por ejemplo, `http://cecilio.local` y operar ambos paneles sin
 que el navegador conozca la URL o IP del segundo rover.
+
+Al entrar en modo competencia, cada rover comprueba Wi-Fi con IPv4, espera hasta
+cinco segundos una trama válida del servidor TCP configurado, confirma el enlace ESP-NOW en cinco segundos y consulta
+`WHO_AM_I` del compañero en otros cinco segundos. Las identidades deben ser Rover
+10 y Rover 11. Cada placa compara localmente su MAC STA con la MAC configurada del
+compañero como enteros de 48 bits: la mayor es comandante y la menor soldado. Hasta
+terminar la verificación los motores permanecen detenidos. Un fallo queda fijado
+hasta salir y volver a entrar en competencia; el NeoPixel integrado muestra tantos
+destellos rojos como el paso fallido (1 a 5), de 200 ms encendido y 200 ms apagado,
+con un segundo de pausa entre grupos. En éxito conserva ámbar para Rover 10 y
+violeta para Rover 11. El estado HTTP expone `competition_check` con paso, error,
+resultado y función.
+
+| Destellos rojos por grupo | Paso fallido | Qué significa y qué revisar |
+|---:|---|---|
+| 1 | Wi-Fi | El rover no obtuvo conexión con dirección IPv4 en 15 segundos. Revise las credenciales, el punto de acceso y la asignación de IP. |
+| 2 | Datos del servidor | No llegó una trama válida del servidor TCP en 5 segundos. Revise `server_ipv4`, `server_port`, la conexión de red y el contrato v2. No se requiere que el servidor responda a ping. |
+| 3 | Enlace ESP-NOW | No llegó la respuesta del compañero en 5 segundos. Revise su alimentación, la MAC `peer_mac`, el canal Wi-Fi y que ambos tengan el protocolo ESP-NOW v4. |
+| 4 | `WHO_AM_I` | No llegó la identidad en 5 segundos, es inválida o coincide con la propia. Configure uno como Rover 10 y el otro como Rover 11. |
+| 5 | Comparación de MAC | No se pudo leer la MAC STA propia, falta la MAC del compañero o ambas son iguales. Revise `peer_mac` en la configuración. |
+
+Los grupos se repiten hasta salir del modo competencia. La luz permanece apagada
+durante las comprobaciones y vuelve al azul pulsante al entrar en modo prueba.
 
 En modo prueba la web muestra IMU, sensores, red, la pose fusionada y una flecha 3D
 de Three.js. Permite control diferencial directo y acepta objetivos decimales `(col, row)`

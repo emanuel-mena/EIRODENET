@@ -111,6 +111,16 @@ static esp_err_t state_handler(httpd_req_t *request)
     cJSON_AddStringToObject(root, "hostname", s_hostname);
     cJSON_AddStringToObject(root, "mode", app_mode_name(app_mode_get()));
     cJSON_AddStringToObject(root, "competition", competition_service_status());
+    competition_status_t competition = {0};
+    competition_service_get_status(&competition);
+    cJSON *competition_check = cJSON_AddObjectToObject(root, "competition_check");
+    cJSON_AddNumberToObject(competition_check, "step", competition.step);
+    cJSON_AddNumberToObject(competition_check, "failed_step", competition.failed_step);
+    cJSON_AddNumberToObject(competition_check, "error", competition.error);
+    cJSON_AddBoolToObject(competition_check, "ready", competition.ready);
+    cJSON_AddStringToObject(competition_check, "role",
+        competition.role == COMPETITION_ROLE_COMMANDER ? "commander" :
+        competition.role == COMPETITION_ROLE_SOLDIER ? "soldier" : "none");
 
     cJSON *imu_json = cJSON_AddObjectToObject(root, "imu");
     cJSON_AddBoolToObject(imu_json, "valid", imu.valid);

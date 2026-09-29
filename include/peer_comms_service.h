@@ -43,6 +43,9 @@ typedef struct {
     uint8_t navigation_wait_reason;
     int16_t drive_left;
     int16_t drive_right;
+    bool link_verified;
+    bool identity_received;
+    uint8_t verified_identity;
 } peer_comms_status_t;
 
 /** Inicia la comunicación ESP-NOW cuando Wi-Fi STA esté operativo. */
@@ -56,3 +59,12 @@ esp_err_t peer_comms_service_send_drive(int16_t left, int16_t right);
 
 /** Envía un objetivo en celdas a la navegación de prueba del compañero. */
 esp_err_t peer_comms_service_send_target(float col, float row);
+
+/** Reinicia los intercambios de verificación de competencia. */
+void peer_comms_service_reset_verification(void);
+
+/** Envía o reenvía una solicitud de enlace; consultar link_verified en el estado. */
+esp_err_t peer_comms_service_probe_link(void);
+
+/** Envía o reenvía WHO_AM_I; consultar identity_received en el estado. */
+esp_err_t peer_comms_service_query_identity(void);

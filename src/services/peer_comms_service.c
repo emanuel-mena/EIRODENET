@@ -18,7 +18,7 @@
 #include "rover_service.h"
 
 #define PEER_MAGIC 0x524f4952U
-#define PEER_PROTOCOL_VERSION 3U
+#define PEER_PROTOCOL_VERSION 4U
 #define PEER_STATE_PERIOD_MS 200U
 #define PEER_TIMEOUT_MS 1500U
 
@@ -26,6 +26,10 @@ typedef enum {
     PEER_MESSAGE_STATE = 1,
     PEER_MESSAGE_DRIVE = 2,
     PEER_MESSAGE_TARGET = 3,
+    PEER_MESSAGE_LINK_REQUEST = 4,
+    PEER_MESSAGE_LINK_REPLY = 5,
+    PEER_MESSAGE_IDENTITY_REQUEST = 6,
+    PEER_MESSAGE_IDENTITY_REPLY = 7,
 } peer_message_type_t;
 
 typedef struct {
@@ -67,6 +71,7 @@ typedef struct {
         peer_state_payload_t state;
         struct { int16_t left; int16_t right; } drive;
         struct { float col; float row; } target;
+        struct { uint32_t nonce; uint8_t identity; } verification;
     } payload;
 } peer_packet_t;
 
@@ -84,6 +89,8 @@ static peer_comms_status_t s_status;
 static uint8_t s_own_id;
 static uint32_t s_sequence;
 static int64_t s_last_seen_ms;
+static uint32_t s_link_nonce;
+static uint32_t s_identity_nonce;
 
 static bool valid_identity(uint8_t identity)
 {
@@ -221,7 +228,32 @@ static void handle_received(const received_packet_t *received)
     const bool expected = s_status.configured &&
         memcmp(received->source_mac, s_status.peer_mac, sizeof(s_status.peer_mac)) == 0;
     xSemaphoreGive(s_lock);
-    if (!expected || !valid_identity(received->packet.source_id) ||
+    if (!expected) return;
+    if (received->packet.type == PEER_MESSAGE_LINK_REQUEST ||
+        received->packet.type == PEER_MESSAGE_IDENTITY_REQUEST) {
+        peer_packet_t reply = {0};
+        reply.type = received->packet.type == PEER_MESSAGE_LINK_REQUEST
+            ? PEER_MESSAGE_LINK_REPLY : PEER_MESSAGE_IDENTITY_REPLY;
+        reply.payload.verification.nonce = received->packet.payload.verification.nonce;
+        reply.payload.verification.identity = s_own_id;
+        send_packet(&reply);
+        return;
+    }
+    if (received->packet.type == PEER_MESSAGE_LINK_REPLY ||
+        received->packet.type == PEER_MESSAGE_IDENTITY_REPLY) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (received->packet.type == PEER_MESSAGE_LINK_REPLY && s_link_nonce != 0 &&
+            received->packet.payload.verification.nonce == s_link_nonce)
+            s_status.link_verified = true;
+        if (received->packet.type == PEER_MESSAGE_IDENTITY_REPLY && s_identity_nonce != 0 &&
+            received->packet.payload.verification.nonce == s_identity_nonce) {
+            s_status.identity_received = true;
+            s_status.verified_identity = received->packet.payload.verification.identity;
+        }
+        xSemaphoreGive(s_lock);
+        return;
+    }
+    if (!valid_identity(received->packet.source_id) ||
         received->packet.source_id == s_own_id) return;
     switch (received->packet.type) {
         case PEER_MESSAGE_STATE:
@@ -244,7 +276,7 @@ static esp_err_t initialize_esp_now(void)
 {
     app_storage_config_t config = {0};
     esp_err_t err = app_storage_get_config(&config);
-    if (err != ESP_OK || !valid_identity(config.who_am_i) || !config.peer_configured) {
+    if (err != ESP_OK || !config.peer_configured) {
         return err == ESP_OK ? ESP_ERR_NOT_FOUND : err;
     }
     err = esp_now_init();
@@ -359,4 +391,40 @@ esp_err_t peer_comms_service_send_target(float col, float row)
     packet.payload.target.col = col;
     packet.payload.target.row = row;
     return send_packet(&packet);
+}
+
+void peer_comms_service_reset_verification(void)
+{
+    if (s_lock == NULL) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_status.link_verified = false;
+    s_status.identity_received = false;
+    s_status.verified_identity = 0;
+    s_link_nonce = 0;
+    s_identity_nonce = 0;
+    xSemaphoreGive(s_lock);
+}
+
+static esp_err_t send_verification(uint8_t type, uint32_t *nonce)
+{
+    if (s_lock == NULL) return ESP_ERR_INVALID_STATE;
+    peer_packet_t packet = {.type = type};
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (*nonce == 0) {
+        *nonce = (uint32_t)esp_timer_get_time() ^ ++s_sequence;
+        if (*nonce == 0) *nonce = 1;
+    }
+    packet.payload.verification.nonce = *nonce;
+    xSemaphoreGive(s_lock);
+    return send_packet(&packet);
+}
+
+esp_err_t peer_comms_service_probe_link(void)
+{
+    return send_verification(PEER_MESSAGE_LINK_REQUEST, &s_link_nonce);
+}
+
+esp_err_t peer_comms_service_query_identity(void)
+{
+    return send_verification(PEER_MESSAGE_IDENTITY_REQUEST, &s_identity_nonce);
 }

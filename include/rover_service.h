@@ -70,6 +70,9 @@ esp_err_t rover_service_start(void);
 void rover_service_get_imu(rover_imu_state_t *state);
 void rover_service_get_sensors(rover_sensor_state_t *state);
 esp_err_t rover_service_get_wifi(internet_adapter_status_t *status);
+
+/** Inicia otro intento de conexión Wi-Fi si no hay uno activo. */
+esp_err_t rover_service_request_wifi_reconnect(void);
 void rover_service_get_network_activity(bool *reconnecting, esp_err_t *last_error);
 esp_err_t rover_service_set_config(const app_storage_config_t *config, bool *wifi_reconnecting);
 esp_err_t rover_service_calibration_start(void);

@@ -23,6 +23,7 @@ typedef struct {
     uint32_t sequence;
     uint64_t frame_timestamp_ms;
     uint64_t received_ms;
+    uint64_t last_valid_frame_ms; /**< Recepción de la última trama v2 válida, aun sin pose propia. */
     uint32_t age_ms;
     uint8_t rover_id;
     float col;

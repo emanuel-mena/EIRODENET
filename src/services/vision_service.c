@@ -217,6 +217,7 @@ static void parse_line(const char *line, size_t length, uint8_t own_id)
     const bool new_frame = s_status.received_ms == 0 ||
                            s_status.frame_timestamp_ms != frame_timestamp_ms;
     s_status.protocol_valid = true;
+    s_status.last_valid_frame_ms = now_ms;
     s_status.sequence = (uint32_t)seq->valuedouble;
     s_status.grid_cols = cols;
     s_status.grid_rows = rows;
