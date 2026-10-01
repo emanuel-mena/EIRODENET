@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "grid_planner.h"
 #include "motor_adapter.h"
+#include "motion_control.h"
 #include "rover_service.h"
 #include "vision_service.h"
 
@@ -91,12 +92,19 @@ static uint8_t s_competition_cube = UINT8_MAX;
 static bool s_competition_contact;
 static uint8_t s_arrival_samples, s_obstacle_samples;
 static uint8_t s_alignment_samples, s_misalignment_samples;
+static uint8_t s_saturation_samples;
 static uint8_t s_slow_pulse_ticks;
 static uint8_t s_ultrasonic_invalid_samples;
 static uint64_t s_ultrasonic_sample_ms;
 static uint8_t s_stable_pattern, s_stable_pattern_samples;
 static uint8_t s_confirmed_pattern;
 static bool s_confirmed_cell_valid;
+static motion_bias_window_t s_bias_window;
+static uint32_t s_bias_generation = UINT32_MAX;
+static bool s_bias_frozen;
+static uint64_t s_last_imu_timestamp_ms;
+static uint32_t s_motion_tick;
+static float s_motor_trim;
 
 static float wrap_degrees(float angle)
 {
@@ -283,15 +291,22 @@ static bool update_estimator(const rover_imu_state_t *imu, const rover_sensor_st
         s_stable_pattern_samples = 1;
     }
     if (sensors->infrared_valid) learn_polarity(observed, vision);
-    if (s_estimator.initialized && imu->valid) {
-        if (!s_status.motor_left && !s_status.motor_right && fabsf(imu->sample.gyro_dps[2]) < 5.0f)
+    if (s_estimator.initialized && imu->valid &&
+        imu->timestamp_ms != s_last_imu_timestamp_ms) {
+        float imu_dt = s_last_imu_timestamp_ms
+            ? (float)(imu->timestamp_ms - s_last_imu_timestamp_ms) / 1000.0f : dt;
+        if (imu_dt <= 0.0f || imu_dt > 0.1f) imu_dt = dt;
+        s_last_imu_timestamp_ms = imu->timestamp_ms;
+        if (app_mode_get() != APP_MODE_COMPETITION && !s_status.motor_left &&
+            !s_status.motor_right && fabsf(imu->sample.gyro_dps[2]) < 5.0f)
             s_estimator.gyro_bias_dps = 0.995f * s_estimator.gyro_bias_dps +
                                        0.005f * imu->sample.gyro_dps[2];
         s_estimator.angular_speed_dps = imu->sample.gyro_dps[2] - s_estimator.gyro_bias_dps;
-        s_estimator.theta_deg = wrap_degrees(s_estimator.theta_deg + s_estimator.angular_speed_dps * dt);
+        s_estimator.theta_deg = wrap_degrees(s_estimator.theta_deg +
+                                            s_estimator.angular_speed_dps * imu_dt);
         const float radians = s_estimator.theta_deg * (float)M_PI / 180.0f;
-        s_estimator.col += s_estimator.speed_cells_s * cosf(radians) * dt;
-        s_estimator.row -= s_estimator.speed_cells_s * sinf(radians) * dt;
+        s_estimator.col += s_estimator.speed_cells_s * cosf(radians) * imu_dt;
+        s_estimator.row -= s_estimator.speed_cells_s * sinf(radians) * imu_dt;
         s_estimator.speed_cells_s *= 0.998f;
         s_estimator.uncertainty_cells += vision->pose_valid ? 0.0002f : 0.0015f;
         s_status.last_correction = NAVIGATION_CORRECTION_IMU;
@@ -567,6 +582,8 @@ static void finish_locked(navigation_phase_t phase, esp_err_t error)
     s_status.crossings_without_vision = 0;
     s_status.wait_reason = NAVIGATION_WAIT_NONE;
     s_slow_pulse_ticks = 0;
+    s_status.motor_correction_saturated = false;
+    s_saturation_samples = 0;
     publish_current_segment();
 }
 
@@ -710,8 +727,10 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
     const float traveled_dy = s_estimator.row - segment->start_row;
     const float along = segment_length > 0
         ? (traveled_dx * segment_dx + traveled_dy * segment_dy) / segment_length : 0;
-    const float cross = segment_length > 0
-        ? fabsf(traveled_dx * segment_dy - traveled_dy * segment_dx) / segment_length : 0;
+    const float signed_cross = segment_length > 0
+        ? (traveled_dx * segment_dy - traveled_dy * segment_dx) / segment_length : 0;
+    const float cross = fabsf(signed_cross);
+    s_status.cross_track_cells = signed_cross;
     const bool final_segment = s_route.segment_index + 1 >= s_route.segment_count;
     if ((final_segment && along > segment_length + ARRIVAL_CELLS) || cross > 0.75f) {
         set_motors_locked(0, 0);
@@ -755,17 +774,50 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
                 s_slow_pulse_ticks = 0;
             }
         } else s_misalignment_samples = 0;
-    } else if (fabsf(error) <= ENTER_DRIVE_DEG) {
+    } else if (fabsf(error) <= (s_competition_target ? 3.0f : ENTER_DRIVE_DEG) &&
+               (!s_competition_target || fabsf(s_estimator.angular_speed_dps) <= 20.0f)) {
         if (++s_alignment_samples >= ALIGNMENT_SAMPLES) {
             s_status.phase = NAVIGATION_DRIVING;
             s_alignment_samples = s_misalignment_samples = 0;
         }
     } else s_alignment_samples = 0;
     if (s_status.phase == NAVIGATION_DRIVING) {
-        const int base = distance <= SLOW_DISTANCE_CELLS ? SLOW_PWM : DRIVE_PWM;
-        int correction = (int)lroundf(error * 8.0f);
-        correction = correction > 150 ? 150 : (correction < -150 ? -150 : correction);
-        if (distance <= SLOW_DISTANCE_CELLS) {
+        const float speed = fabsf(s_estimator.speed_cells_s);
+        const float brake_distance = s_competition_target
+            ? fmaxf(SLOW_DISTANCE_CELLS, speed * speed / 24.0f + speed * 0.15f)
+            : SLOW_DISTANCE_CELLS;
+        const bool slow = distance <= brake_distance;
+        int left, right;
+        if (s_competition_target && !slow) {
+            bool saturated;
+            if (new_vision_frame && vision->pose_valid && fabsf(error) < 5.0f &&
+                fabsf(signed_cross) < 0.25f && fabsf(s_estimator.angular_speed_dps) < 15.0f)
+                s_motor_trim = fmaxf(-100.0f, fminf(100.0f,
+                    s_motor_trim - 0.15f * s_estimator.angular_speed_dps));
+            motion_drive_command(error, signed_cross, s_estimator.angular_speed_dps,
+                                 s_motor_trim, &left, &right, &saturated);
+            s_status.motor_correction_saturated = saturated;
+            s_status.motor_trim_pwm = s_motor_trim;
+            if (saturated) {
+                if (s_saturation_samples < UINT8_MAX) ++s_saturation_samples;
+                if (s_saturation_samples >= 10) {
+                    set_motors_locked(0, 0);
+                    s_route.valid = false;
+                    s_status.phase = NAVIGATION_REPLANNING;
+                    s_saturation_samples = 0;
+                    return;
+                }
+            } else s_saturation_samples = 0;
+        } else {
+            s_saturation_samples = 0;
+            const int base = slow ? SLOW_PWM : DRIVE_PWM;
+            int correction = (int)lroundf(error * 8.0f);
+            correction = correction > 150 ? 150 : (correction < -150 ? -150 : correction);
+            left = base - correction;
+            right = base + correction;
+            s_status.motor_correction_saturated = false;
+        }
+        if (slow) {
             if (new_vision_frame && s_slow_pulse_ticks == 0)
                 s_slow_pulse_ticks = SLOW_PULSE_CONTROL_TICKS;
             if (s_slow_pulse_ticks == 0) {
@@ -776,11 +828,16 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         } else {
             s_slow_pulse_ticks = 0;
         }
-        set_motors_locked(base - correction, base + correction);
+        set_motors_locked(left, right);
     } else {
         s_status.phase = NAVIGATION_TURNING;
         s_slow_pulse_ticks = 0;
-        if (fabsf(error) <= ENTER_DRIVE_DEG) {
+        if (s_competition_target) {
+            bool settled;
+            const int pwm = motion_turn_pwm(error, s_estimator.angular_speed_dps,
+                                            ++s_motion_tick, &settled);
+            set_motors_locked(-pwm, pwm);
+        } else if (fabsf(error) <= ENTER_DRIVE_DEG) {
             set_motors_locked(0, 0);
         } else {
             set_motors_locked(error > 0 ? -TURN_PWM : TURN_PWM,
@@ -826,12 +883,46 @@ static void navigation_task(void *argument)
         float dt = (float)(now_ms - previous_ms) / 1000.0f;
         if (dt <= 0 || dt > 0.1f) dt = 0.01f;
         xSemaphoreTake(s_lock, portMAX_DELAY);
+        const app_mode_t mode = app_mode_get();
+        const uint32_t generation = app_mode_generation();
+        if (generation != s_bias_generation) {
+            s_bias_generation = generation;
+            s_bias_frozen = false;
+            motion_bias_reset(&s_bias_window);
+            s_status.competition_bias_valid = false;
+            s_status.competition_bias_samples = 0;
+            s_status.competition_gyro_bias_dps = 0;
+            s_estimator.gyro_bias_dps = 0;
+            s_motor_trim = 0;
+            s_status.motor_trim_pwm = 0;
+        }
+        if (mode == APP_MODE_COMPETITION && !s_bias_frozen) {
+            if (vision.phase == VISION_PHASE_RUNNING) {
+                float bias = 0;
+                s_status.competition_bias_valid = motion_bias_result(&s_bias_window, &bias);
+                s_status.competition_gyro_bias_dps = s_status.competition_bias_valid ? bias : 0;
+                s_status.competition_bias_samples = s_bias_window.count;
+                if (s_status.competition_bias_valid) s_estimator.gyro_bias_dps = bias;
+                s_bias_frozen = true;
+                ESP_LOGI(TAG, "Sesgo Z en competencia: %s, %u muestras, %+.4f dps",
+                         s_status.competition_bias_valid ? "valido" : "sin ajuste",
+                         (unsigned)s_bias_window.count, (double)s_status.competition_gyro_bias_dps);
+            } else if (!s_status.motor_left && !s_status.motor_right && imu.valid &&
+                       imu.calibration_valid && vision.phase != VISION_PHASE_FINISHED) {
+                motion_bias_add(&s_bias_window, imu.timestamp_ms, imu.sample.accel_g,
+                                imu.sample.gyro_dps);
+                s_status.competition_bias_samples = s_bias_window.count;
+            } else if (s_status.motor_left || s_status.motor_right) {
+                motion_bias_reset(&s_bias_window);
+                s_status.competition_bias_samples = 0;
+            }
+        }
         const bool new_vision_frame = update_estimator(&imu, &sensors, &vision, dt, now_ms);
         pending_vision_frame |= new_vision_frame;
         publish_status(&vision);
         update_confirmed_cell(&vision, new_vision_frame);
         control_tick = !control_tick;
-        if (control_tick) {
+        if (control_tick || (s_competition_target && s_status.has_target)) {
             update_controller(&imu, &sensors, &vision, pending_vision_frame);
             pending_vision_frame = false;
         }
@@ -891,6 +982,7 @@ static esp_err_t navigation_service_submit_internal(float col, float row,
     s_arrival_samples = s_obstacle_samples = s_ultrasonic_invalid_samples = 0;
     s_ultrasonic_sample_ms = sensors.timestamp_ms;
     s_alignment_samples = s_misalignment_samples = 0;
+    s_saturation_samples = 0;
     s_slow_pulse_ticks = 0;
     const uint32_t id = s_status.request_id;
     xSemaphoreGive(s_lock);

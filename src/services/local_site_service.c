@@ -186,6 +186,12 @@ static esp_err_t state_handler(httpd_req_t *request)
     cJSON_AddNumberToObject(pose_json, "theta_deg", navigation.theta_deg);
     cJSON_AddNumberToObject(pose_json, "speed_cells_s", navigation.linear_speed_cells_s);
     cJSON_AddNumberToObject(pose_json, "angular_speed_dps", navigation.angular_speed_dps);
+    cJSON_AddNumberToObject(pose_json, "competition_gyro_bias_dps",
+                            navigation.competition_gyro_bias_dps);
+    cJSON_AddNumberToObject(pose_json, "competition_bias_samples",
+                            navigation.competition_bias_samples);
+    cJSON_AddBoolToObject(pose_json, "competition_bias_valid",
+                          navigation.competition_bias_valid);
     cJSON_AddNumberToObject(pose_json, "uncertainty_cells", navigation.uncertainty_cells);
     cJSON_AddNumberToObject(pose_json, "vision_heading_offset_deg",
                             navigation.vision_heading_offset_deg);
@@ -215,6 +221,10 @@ static esp_err_t state_handler(httpd_req_t *request)
                             navigation.crossings_without_vision);
     cJSON_AddNumberToObject(route_json, "replans", navigation.replan_count);
     cJSON_AddNumberToObject(route_json, "wait_reason", navigation.wait_reason);
+    cJSON_AddNumberToObject(route_json, "cross_track_cells", navigation.cross_track_cells);
+    cJSON_AddNumberToObject(route_json, "motor_trim_pwm", navigation.motor_trim_pwm);
+    cJSON_AddBoolToObject(route_json, "motor_correction_saturated",
+                          navigation.motor_correction_saturated);
     cJSON *nav_motors = cJSON_AddObjectToObject(nav_json, "motors");
     cJSON_AddNumberToObject(nav_motors, "left", navigation.motor_left);
     cJSON_AddNumberToObject(nav_motors, "right", navigation.motor_right);

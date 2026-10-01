@@ -52,6 +52,12 @@ typedef struct {
     float theta_deg;
     float linear_speed_cells_s;
     float angular_speed_dps;
+    float competition_gyro_bias_dps;
+    uint16_t competition_bias_samples;
+    bool competition_bias_valid;
+    float cross_track_cells;
+    float motor_trim_pwm;
+    bool motor_correction_saturated;
     float uncertainty_cells;
     float vision_heading_offset_deg;
     bool vision_heading_calibrated;

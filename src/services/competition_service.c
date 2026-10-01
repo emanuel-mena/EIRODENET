@@ -267,7 +267,7 @@ static void competition_task(void *argument)
                     competition_runtime_tick(status.role, generation);
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 

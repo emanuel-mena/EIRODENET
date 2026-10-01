@@ -8,6 +8,7 @@
 #include "esp_timer.h"
 #include "grid_planner.h"
 #include "motor_adapter.h"
+#include "motion_control.h"
 #include "navigation_service.h"
 #include "peer_comms_service.h"
 #include "rover_service.h"
@@ -43,6 +44,7 @@ static peer_mission_t s_local, s_remote;
 static exec_phase_t s_phase;
 static uint8_t s_point_index, s_delivered_mask, s_assigned_mask;
 static uint8_t s_capture_samples, s_delivery_samples;
+static uint8_t s_align_stable_samples;
 static uint32_t s_nav_request, s_next_id;
 static uint8_t s_remote_fragment;
 static uint64_t s_remote_sent_ms, s_motor_pulse_ms, s_sample_ms, s_frame_ms;
@@ -439,6 +441,8 @@ static void execute_local(const vision_status_t *v)
     const float dy = v->depot_row[color] - v->cubes[color].row;
     const float desired = atan2f(-dy, dx) * 57.2957795f;
     const float error = heading_error(desired, v->theta_deg);
+    navigation_status_t navigation = {0};
+    navigation_service_get_status(&navigation);
     rover_sensor_state_t sensors = {0};
     rover_imu_state_t imu = {0};
     rover_service_get_sensors(&sensors);
@@ -452,18 +456,26 @@ static void execute_local(const vision_status_t *v)
     const bool opening = cube_in_opening(v, color);
     if (s_phase == EXEC_ALIGN)
     {
-        if (fabsf(error) > 8.0f)
+        const float align_error = navigation.pose_valid
+            ? motion_wrap_degrees(desired - navigation.theta_deg) : error;
+        if (fabsf(align_error) > 45.0f ||
+            length(v->cubes[color].col - v->col,
+                   v->cubes[color].row - v->row) < 8.2f)
         {
-            if (fabsf(error) > 45.0f || length(v->cubes[color].col - v->col,
-                                               v->cubes[color].row - v->row) < 8.2f)
-            {
-                hold();
-                return;
-            }
-            motor_adapter_set(error > 0 ? -700 : 700, error > 0 ? 700 : -700);
+            hold();
+            return;
+        }
+        bool settled = false;
+        const int pwm = motion_turn_pwm(align_error, navigation.angular_speed_dps,
+                                        (uint32_t)(now_ms() / 10U), &settled);
+        if (!settled) {
+            s_align_stable_samples = 0;
+            motor_adapter_set(-pwm, pwm);
             return;
         }
         motor_adapter_stop();
+        if (++s_align_stable_samples < 3) return;
+        s_align_stable_samples = 0;
         s_phase = EXEC_CAPTURE;
         s_capture_samples = 0;
         return;

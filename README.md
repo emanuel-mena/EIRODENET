@@ -287,6 +287,29 @@ el panel del compañero se marca desconectado y bloquea telemetría y comandos. 
 eso se puede abrir, por ejemplo, `http://cecilio.local` y operar ambos paneles sin
 que el navegador conozca la URL o IP del segundo rover.
 
+### Estado esperado al entrar en competencia
+
+Coloque ambos rovers cerca de la salida publicada por el servidor, en el centro
+del lado izquierdo de la cancha efectiva. Deben estar apoyados sobre la cuadrícula,
+quietos y con el frente alineado con el eje `col`, apuntando hacia el interior: en el
+contrato v2 esto es `theta = 0°`, dirección de `col` creciente. Mantenga visibles
+los marcadores ArUco de ambos rovers y no los mueva mientras se toman las cinco
+capturas de calibración. La corrección supone esa orientación física; si un rover
+está inclinado al entrar, el desfase calculado incorporará esa inclinación como
+si fuera un error del sistema de visión.
+
+Antes de pulsar BOOT, configure en cada rover su identidad (10 u 11), la MAC del
+compañero, Wi-Fi y la dirección del servidor de visión v2. Ambos deben usar el
+mismo firmware ESP-NOW v6. El servidor debe ver la cancha y los marcadores y
+llegar a `READY` con tiempo para completar la verificación y las cinco capturas.
+La IMU debe estar calibrada y los infrarrojos operativos para que después se
+acepten objetivos de navegación. Al entrar en competencia el firmware detiene los
+motores. Manténgalos quietos hasta que termine el intento de calibración (máximo
+tres segundos desde que comienza en `READY`) y compruebe
+`navigation.pose.vision_heading_calibrated` o el registro serie. Tras el intento,
+el NeoPixel fijo indica calibración válida y el parpadeo del color de identidad
+indica que continúa sin ella.
+
 Al entrar en modo competencia, cada rover comprueba Wi-Fi con IPv4, espera hasta
 cinco segundos una trama válida del servidor TCP configurado, confirma el enlace ESP-NOW en cinco segundos y consulta
 `WHO_AM_I` del compañero en otros cinco segundos. Las identidades deben ser Rover
