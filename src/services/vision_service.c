@@ -35,6 +35,14 @@ static bool integer_number(const cJSON *item)
     return finite_number(item) && item->valuedouble == floor(item->valuedouble);
 }
 
+static int cube_color(const char *color)
+{
+    if (strcmp(color, "green") == 0) return VISION_CUBE_GREEN;
+    if (strcmp(color, "blue") == 0) return VISION_CUBE_BLUE;
+    if (strcmp(color, "red") == 0) return VISION_CUBE_RED;
+    return -1;
+}
+
 static bool exact_fields(const cJSON *object, const char *const *names, size_t count)
 {
     if (!cJSON_IsObject(object)) return false;
@@ -127,6 +135,8 @@ static bool valid_contract(const cJSON *root, const cJSON **own_rover,
     if (!cJSON_IsArray(rovers) || !cJSON_IsArray(cubes) || !cJSON_IsArray(obstacles) ||
         !cJSON_IsArray(depots)) return false;
     if (cJSON_GetArraySize(rovers) > VISION_MAX_ROVERS ||
+        cJSON_GetArraySize(cubes) > VISION_MAX_CUBES ||
+        cJSON_GetArraySize(depots) > VISION_MAX_CUBES ||
         cJSON_GetArraySize(obstacles) > VISION_MAX_OBSTACLES) return false;
     *own_rover = NULL;
     const cJSON *item = NULL;
@@ -222,6 +232,10 @@ static void parse_line(const char *line, size_t length, uint8_t own_id)
     s_status.grid_cols = cols;
     s_status.grid_rows = rows;
     s_status.cell_mm = cell_mm;
+    const char *phase = cJSON_GetObjectItemCaseSensitive(root, "phase")->valuestring;
+    s_status.phase = strcmp(phase, "READY") == 0 ? VISION_PHASE_READY :
+        strcmp(phase, "RUNNING") == 0 ? VISION_PHASE_RUNNING :
+        strcmp(phase, "FINISHED") == 0 ? VISION_PHASE_FINISHED : VISION_PHASE_IDLE;
     s_status.rover_id = own_id;
     s_status.last_error = ESP_OK;
     if (new_frame) {
@@ -230,6 +244,33 @@ static void parse_line(const char *line, size_t length, uint8_t own_id)
         s_status.pose_valid = false;
         s_status.peer_valid = false;
         s_status.obstacle_count = 0;
+        memset(s_status.cube_valid, 0, sizeof(s_status.cube_valid));
+        memset(s_status.depot_valid, 0, sizeof(s_status.depot_valid));
+        s_status.depot_length = (float)cJSON_GetObjectItemCaseSensitive(
+            cJSON_GetObjectItemCaseSensitive(root, "depot_size"), "length")->valuedouble;
+        s_status.depot_depth = (float)cJSON_GetObjectItemCaseSensitive(
+            cJSON_GetObjectItemCaseSensitive(root, "depot_size"), "depth")->valuedouble;
+        s_status.cube_side = (float)cJSON_GetObjectItemCaseSensitive(root, "cube_side")->valuedouble;
+        const cJSON *item = NULL;
+        const cJSON *cubes = cJSON_GetObjectItemCaseSensitive(root, "cubes");
+        cJSON_ArrayForEach(item, cubes) {
+            const int color = cube_color(cJSON_GetObjectItemCaseSensitive(item, "color")->valuestring);
+            if (color < 0) continue;
+            s_status.cube_valid[color] = true;
+            s_status.cubes[color] = (vision_position_t){
+                .col = (float)cJSON_GetObjectItemCaseSensitive(item, "col")->valuedouble,
+                .row = (float)cJSON_GetObjectItemCaseSensitive(item, "row")->valuedouble,
+                .age_ms = (uint32_t)cJSON_GetObjectItemCaseSensitive(item, "age_ms")->valuedouble,
+            };
+        }
+        const cJSON *depots = cJSON_GetObjectItemCaseSensitive(root, "depots");
+        cJSON_ArrayForEach(item, depots) {
+            const int color = cube_color(cJSON_GetObjectItemCaseSensitive(item, "color")->valuestring);
+            if (color < 0) continue;
+            s_status.depot_valid[color] = true;
+            s_status.depot_col[color] = (float)cJSON_GetObjectItemCaseSensitive(item, "col")->valuedouble;
+            s_status.depot_row[color] = (float)cJSON_GetObjectItemCaseSensitive(item, "row")->valuedouble;
+        }
         if (rover != NULL) {
             const uint32_t age =
                 (uint32_t)cJSON_GetObjectItemCaseSensitive(rover, "age_ms")->valuedouble;
@@ -243,7 +284,6 @@ static void parse_line(const char *line, size_t length, uint8_t own_id)
             }
         }
         const cJSON *rovers = cJSON_GetObjectItemCaseSensitive(root, "rovers");
-        const cJSON *item = NULL;
         cJSON_ArrayForEach(item, rovers) {
             const uint8_t id = (uint8_t)cJSON_GetObjectItemCaseSensitive(item, "id")->valueint;
             if (id == own_id) continue;
@@ -381,6 +421,13 @@ void vision_service_get_status(vision_status_t *status)
             if (elapsed > UINT32_MAX - status->obstacles[i].age_ms)
                 status->obstacles[i].age_ms = UINT32_MAX;
             else status->obstacles[i].age_ms += (uint32_t)elapsed;
+        }
+        for (uint8_t i = 0; i < VISION_MAX_CUBES; ++i) {
+            if (elapsed > UINT32_MAX - status->cubes[i].age_ms)
+                status->cubes[i].age_ms = UINT32_MAX;
+            else status->cubes[i].age_ms += (uint32_t)elapsed;
+            status->cube_valid[i] = status->cube_valid[i] &&
+                status->cubes[i].age_ms <= VISION_MAX_POSE_AGE_MS;
         }
     }
     xSemaphoreGive(s_lock);

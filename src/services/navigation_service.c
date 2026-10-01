@@ -85,6 +85,9 @@ static estimator_t s_estimator;
 static navigation_route_t s_route;
 static uint8_t s_occupancy[GRID_PLANNER_MAX_CELLS];
 static uint32_t s_next_request;
+static bool s_competition_target;
+static uint8_t s_competition_cube = UINT8_MAX;
+static bool s_competition_contact;
 static uint8_t s_arrival_samples, s_obstacle_samples;
 static uint8_t s_alignment_samples, s_misalignment_samples;
 static uint8_t s_slow_pulse_ticks;
@@ -320,8 +323,9 @@ static esp_err_t build_occupancy(const vision_status_t *vision)
     memset(s_occupancy, 0, (size_t)cols * rows);
     for (uint8_t row = 0; row < rows; ++row) {
         for (uint8_t col = 0; col < cols; ++col) {
-            if (col < NAV_GRID_MARGIN_CELLS || row < NAV_GRID_MARGIN_CELLS ||
-                col >= cols - NAV_GRID_MARGIN_CELLS || row >= rows - NAV_GRID_MARGIN_CELLS)
+            const int margin = NAV_GRID_MARGIN_CELLS;
+            if (col < margin || row < margin ||
+                col >= cols - margin || row >= rows - margin)
                 s_occupancy[row * cols + col] = 1;
         }
     }
@@ -329,11 +333,22 @@ static esp_err_t build_occupancy(const vision_status_t *vision)
         const vision_position_t *obstacle = &vision->obstacles[i];
         if (obstacle->age_ms > VISION_FRESH_MS) continue;
         mark_occupied(cols, rows, coordinate_cell(obstacle->col, cols),
-                      coordinate_cell(obstacle->row, rows), NAV_OBSTACLE_RADIUS_CELLS);
+                      coordinate_cell(obstacle->row, rows),
+                      s_competition_target ? 10 : NAV_OBSTACLE_RADIUS_CELLS);
     }
     if (vision->peer_valid && vision->peer_age_ms <= VISION_FRESH_MS) {
         mark_occupied(cols, rows, coordinate_cell(vision->peer_col, cols),
-                      coordinate_cell(vision->peer_row, rows), NAV_PEER_RADIUS_CELLS);
+                      coordinate_cell(vision->peer_row, rows),
+                      s_competition_target ? 6 : NAV_PEER_RADIUS_CELLS);
+    }
+    if (s_competition_target) {
+        for (uint8_t i = 0; i < VISION_MAX_CUBES; ++i) {
+            if ((i == s_competition_cube && s_competition_contact) ||
+                !vision->cube_valid[i] ||
+                vision->cubes[i].age_ms > VISION_FRESH_MS) continue;
+            mark_occupied(cols, rows, coordinate_cell(vision->cubes[i].col, cols),
+                          coordinate_cell(vision->cubes[i].row, rows), 8);
+        }
     }
     return ESP_OK;
 }
@@ -566,7 +581,11 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
                               const vision_status_t *vision, bool new_vision_frame)
 {
     if (!s_status.has_target) return;
-    if (app_mode_get() != APP_MODE_TEST) {
+    if ((s_competition_target && (app_mode_get() != APP_MODE_COMPETITION ||
+         vision->phase != VISION_PHASE_RUNNING || !vision->connected ||
+         !vision->protocol_valid || vision->received_ms == 0 ||
+         (uint64_t)(esp_timer_get_time() / 1000) - vision->last_valid_frame_ms > VISION_FRESH_MS)) ||
+        (!s_competition_target && app_mode_get() != APP_MODE_TEST)) {
         s_status.cancel_reason = NAVIGATION_CANCEL_MODE;
         finish_locked(NAVIGATION_CANCELLED, ESP_ERR_INVALID_STATE);
         return;
@@ -592,7 +611,7 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
     if (new_ultrasonic_sample) {
         s_ultrasonic_sample_ms = sensors->timestamp_ms;
         s_ultrasonic_invalid_samples = 0;
-        if (sensors->distance_mm <= OBSTACLE_MM) {
+        if (sensors->distance_mm <= (s_competition_target ? 30U : OBSTACLE_MM)) {
             if (s_obstacle_samples < UINT8_MAX) ++s_obstacle_samples;
         } else {
             s_obstacle_samples = 0;
@@ -638,6 +657,20 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
     if (s_obstacle_samples >= OBSTACLE_SAMPLES) {
         finish_locked(NAVIGATION_BLOCKED, ESP_ERR_INVALID_STATE);
         return;
+    }
+    if (s_competition_target && vision->peer_valid &&
+        hypotf(vision->peer_col - s_estimator.col,
+               vision->peer_row - s_estimator.row) < 11.6f) {
+        if (!s_route.valid || s_route.segment_index >= s_route.segment_count) {
+            set_motors_locked(0, 0);
+            return;
+        }
+        const route_segment_t *next = &s_route.segments[s_route.segment_index];
+        const float away = (next->end_col - s_estimator.col) *
+            (s_estimator.col - vision->peer_col) +
+            (next->end_row - s_estimator.row) *
+            (s_estimator.row - vision->peer_row);
+        if (away <= 0) { set_motors_locked(0, 0); return; }
     }
     if (s_status.phase == NAVIGATION_WAITING_FOR_VISION) {
         set_motors_locked(0, 0);
@@ -813,9 +846,11 @@ esp_err_t navigation_service_start(void)
                                    NULL, 1) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
-esp_err_t navigation_service_submit(float col, float row, uint32_t *request_id)
+static esp_err_t navigation_service_submit_internal(float col, float row,
+                                                    uint32_t *request_id, bool competition)
 {
-    if (s_lock == NULL || app_mode_get() != APP_MODE_TEST || !isfinite(col) || !isfinite(row))
+    if (s_lock == NULL || app_mode_get() != (competition ? APP_MODE_COMPETITION : APP_MODE_TEST) ||
+        !isfinite(col) || !isfinite(row))
         return ESP_ERR_INVALID_STATE;
     vision_status_t vision = {0};
     rover_imu_state_t imu = {0};
@@ -840,6 +875,7 @@ esp_err_t navigation_service_submit(float col, float row, uint32_t *request_id)
     }
     s_status.col = col;
     s_status.row = row;
+    s_competition_target = competition;
     s_status.request_id = ++s_next_request;
     s_status.has_target = true;
     s_status.phase = NAVIGATION_PLANNING;
@@ -858,6 +894,33 @@ esp_err_t navigation_service_submit(float col, float row, uint32_t *request_id)
     if (request_id != NULL) *request_id = id;
     ESP_LOGI(TAG, "Objetivo #%lu (%.2f, %.2f)", (unsigned long)id, (double)col, (double)row);
     return ESP_OK;
+}
+
+esp_err_t navigation_service_submit(float col, float row, uint32_t *request_id)
+{
+    return navigation_service_submit_internal(col, row, request_id, false);
+}
+
+esp_err_t navigation_service_submit_competition(float col, float row, uint32_t *request_id)
+{
+    if (app_mode_get() != APP_MODE_COMPETITION) return ESP_ERR_INVALID_STATE;
+    vision_status_t vision = {0};
+    vision_service_get_status(&vision);
+    if (vision.phase != VISION_PHASE_RUNNING || !vision.connected ||
+        !vision.protocol_valid || !vision.pose_valid || vision.received_ms == 0 ||
+        (uint64_t)(esp_timer_get_time() / 1000) - vision.last_valid_frame_ms > VISION_FRESH_MS)
+        return ESP_ERR_INVALID_STATE;
+    esp_err_t err = navigation_service_submit_internal(col, row, request_id, true);
+    return err;
+}
+
+void navigation_service_set_competition_cube(uint8_t color, bool allow_contact)
+{
+    if (s_lock == NULL) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_competition_cube = color < VISION_MAX_CUBES ? color : UINT8_MAX;
+    s_competition_contact = allow_contact;
+    xSemaphoreGive(s_lock);
 }
 
 esp_err_t navigation_service_cancel(navigation_cancel_reason_t reason)

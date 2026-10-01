@@ -7,6 +7,20 @@
 
 #define VISION_MAX_OBSTACLES 32U
 #define VISION_MAX_ROVERS 2U
+#define VISION_MAX_CUBES 3U
+
+typedef enum {
+    VISION_PHASE_IDLE = 0,
+    VISION_PHASE_READY,
+    VISION_PHASE_RUNNING,
+    VISION_PHASE_FINISHED,
+} vision_phase_t;
+
+typedef enum {
+    VISION_CUBE_GREEN = 0,
+    VISION_CUBE_BLUE,
+    VISION_CUBE_RED,
+} vision_cube_color_t;
 
 typedef struct {
     float col;
@@ -37,6 +51,15 @@ typedef struct {
     uint32_t peer_age_ms;
     uint8_t obstacle_count;
     vision_position_t obstacles[VISION_MAX_OBSTACLES];
+    vision_phase_t phase;
+    bool cube_valid[VISION_MAX_CUBES];
+    vision_position_t cubes[VISION_MAX_CUBES];
+    bool depot_valid[VISION_MAX_CUBES];
+    float depot_col[VISION_MAX_CUBES];
+    float depot_row[VISION_MAX_CUBES];
+    float depot_length;
+    float depot_depth;
+    float cube_side;
     uint16_t grid_cols;
     uint16_t grid_rows;
     float cell_mm;

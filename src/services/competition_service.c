@@ -1,4 +1,5 @@
 #include "competition_service.h"
+#include "competition_runtime.h"
 
 #include "app_mode.h"
 #include "app_storage.h"
@@ -194,8 +195,14 @@ static void competition_task(void *argument)
             verify(generation);
         } else if (mode == APP_MODE_TEST && generation != handled_generation) {
             handled_generation = generation;
+            competition_runtime_reset();
             peer_comms_service_reset_verification();
             publish(0, 0, false, COMPETITION_ROLE_NONE, ESP_OK);
+        } else if (mode == APP_MODE_COMPETITION) {
+            competition_status_t status = {0};
+            competition_service_get_status(&status);
+            if (status.ready && !status.failed_step)
+                competition_runtime_tick(status.role, generation);
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
@@ -203,6 +210,6 @@ static void competition_task(void *argument)
 
 esp_err_t competition_service_start(void)
 {
-    return xTaskCreate(competition_task, "competition", 4096, NULL, 4, NULL) == pdPASS
+    return xTaskCreate(competition_task, "competition", 12288, NULL, 4, NULL) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }

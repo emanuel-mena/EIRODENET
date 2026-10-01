@@ -82,5 +82,8 @@ typedef struct {
 
 esp_err_t navigation_service_start(void);
 esp_err_t navigation_service_submit(float col, float row, uint32_t *request_id);
+/** Objetivo interno de competencia; el modo y la fase RUNNING se verifican también en cada ciclo. */
+esp_err_t navigation_service_submit_competition(float col, float row, uint32_t *request_id);
+void navigation_service_set_competition_cube(uint8_t color, bool allow_contact);
 esp_err_t navigation_service_cancel(navigation_cancel_reason_t reason);
 void navigation_service_get_status(navigation_status_t *status);

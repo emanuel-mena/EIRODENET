@@ -281,7 +281,7 @@ npm run dev
 La página sólo se conecta por HTTP al rover que la sirve, sin asumir nombres como
 `rover-10.local` o `rover-11.local`. Ese rover expone su propio estado y actúa como
 puente hacia el compañero mediante ESP-NOW y la MAC guardada en `peer_mac`. Ambos
-rovers publican un paquete binario de estado ESP-NOW v4 cada 200 ms, incluida la
+rovers publican un paquete binario de estado ESP-NOW v5 cada 200 ms, incluida la
 ruta discreta; tras 1500 ms sin paquetes,
 el panel del compañero se marca desconectado y bloquea telemetría y comandos. Por
 eso se puede abrir, por ejemplo, `http://cecilio.local` y operar ambos paneles sin
@@ -303,7 +303,7 @@ resultado y función.
 |---:|---|---|
 | 1 | Wi-Fi | El rover no obtuvo conexión con dirección IPv4 en 15 segundos. Revise las credenciales, el punto de acceso y la asignación de IP. |
 | 2 | Datos del servidor | No llegó una trama válida del servidor TCP en 5 segundos. Revise `server_ipv4`, `server_port`, la conexión de red y el contrato v2. No se requiere que el servidor responda a ping. |
-| 3 | Enlace ESP-NOW | No llegó la respuesta del compañero en 5 segundos. Revise su alimentación, la MAC `peer_mac`, el canal Wi-Fi y que ambos tengan el protocolo ESP-NOW v4. |
+| 3 | Enlace ESP-NOW | No llegó la respuesta del compañero en 5 segundos. Revise su alimentación, la MAC `peer_mac`, el canal Wi-Fi y que ambos tengan el protocolo ESP-NOW v5. |
 | 4 | `WHO_AM_I` | No llegó la identidad en 5 segundos, es inválida o coincide con la propia. Configure uno como Rover 10 y el otro como Rover 11. |
 | 5 | Comparación de MAC | No se pudo leer la MAC STA propia, falta la MAC del compañero o ambas son iguales. Revise `peer_mac` en la configuración. |
 
@@ -343,8 +343,19 @@ con `POST /api/v1/navigation/cancel`.
 El firmware siempre inicia en modo prueba. Una pulsación de BOOT alterna entre
 prueba y competencia y detiene los motores. GPIO2 pulsa en azul durante prueba; en
 competencia queda amarillo para Rover 10 y morado para Rover 11. Una identidad sin
-configurar se señala en rojo. El algoritmo de competencia sigue siendo un stub y no
-genera movimiento autónomo; el controlador punto a punto sólo se habilita en prueba.
+configurar se señala en rojo. En competencia, el comandante espera `READY`, toma
+poses, cubos y depósitos frescos y asigna un cubo a cada rover. Envía al soldado
+una ruta fragmentada por ESP-NOW y espera confirmación de cada fragmento. Los
+motores permanecen detenidos hasta `RUNNING`. Cada rover navega hacia un punto
+detrás de su cubo, se alinea y lo introduce entre los brazos con pulsos lentos.
+El acoplo exige tres lecturas ultrasónicas de 30 mm o menos, o tres timeouts
+acompañados de una posición visual fresca del cubo dentro de la abertura.
+Después empuja hacia el centro del depósito de su color, confirma durante cinco
+capturas nuevas que el cubo completo quedó dentro y retrocede antes de girar.
+Al completarse la primera
+entrega, el comandante asigna el tercer cubo al rover libre con la ruta de
+aproximación más corta. La navegación de prueba sigue usando sus controles
+manuales, que permanecen deshabilitados en competencia.
 
 ## Estructura del repositorio
 
