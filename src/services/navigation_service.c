@@ -56,6 +56,7 @@ typedef struct {
     float col, row, theta_deg;
     float speed_cells_s, angular_speed_dps, gyro_bias_dps;
     float vision_heading_offset_deg, uncertainty_cells;
+    bool vision_heading_calibrated;
     uint64_t vision_frame_timestamp_ms;
     uint64_t vision_ms;
     float vision_col, vision_row;
@@ -241,7 +242,8 @@ static bool apply_vision(const vision_status_t *vision, uint64_t now_ms)
         s_estimator.initialized = true;
         s_estimator.col = vision->col;
         s_estimator.row = vision->row;
-        s_estimator.theta_deg = wrap_degrees(vision->theta_deg);
+        s_estimator.theta_deg = wrap_degrees(
+            vision->theta_deg + s_estimator.vision_heading_offset_deg);
         s_estimator.uncertainty_cells = 0.25f;
     } else {
         s_estimator.col += 0.25f * (vision->col - s_estimator.col);
@@ -797,6 +799,7 @@ static void publish_status(const vision_status_t *vision)
     s_status.angular_speed_dps = s_estimator.angular_speed_dps;
     s_status.uncertainty_cells = s_estimator.uncertainty_cells;
     s_status.vision_heading_offset_deg = s_estimator.vision_heading_offset_deg;
+    s_status.vision_heading_calibrated = s_estimator.vision_heading_calibrated;
     s_status.vision_configured = vision->configured;
     s_status.vision_connected = vision->connected;
     s_status.vision_fresh = vision->pose_valid;
@@ -949,5 +952,32 @@ void navigation_service_get_status(navigation_status_t *status)
     if (status == NULL || s_lock == NULL) return;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     *status = s_status;
+    xSemaphoreGive(s_lock);
+}
+
+void navigation_service_set_heading_calibration(float offset_deg, bool calibrated)
+{
+    if (s_lock == NULL) return;
+    if (!calibrated || !isfinite(offset_deg)) {
+        offset_deg = 0.0f;
+        calibrated = false;
+    }
+    offset_deg = wrap_degrees(offset_deg);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const float change = wrap_degrees(offset_deg - s_estimator.vision_heading_offset_deg);
+    s_estimator.vision_heading_offset_deg = offset_deg;
+    s_estimator.vision_heading_calibrated = calibrated;
+    if (s_estimator.initialized)
+        s_estimator.theta_deg = wrap_degrees(s_estimator.theta_deg + change);
+    if (fabsf(change) > 0.001f) {
+        for (size_t i = 0; i < 4; ++i) {
+            s_estimator.sensor[i].polarity_score = 0;
+            s_estimator.sensor[i].polarity_known = false;
+        }
+        s_status.grid_calibrated = false;
+    }
+    s_status.theta_deg = s_estimator.theta_deg;
+    s_status.vision_heading_offset_deg = offset_deg;
+    s_status.vision_heading_calibrated = calibrated;
     xSemaphoreGive(s_lock);
 }

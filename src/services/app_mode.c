@@ -23,6 +23,7 @@ static uint8_t s_identity;
 static led_strip_handle_t s_led;
 static uint8_t s_failed_step;
 static bool s_competition_ready;
+static bool s_heading_uncalibrated;
 static int64_t s_indicator_epoch_ms;
 static uint32_t s_mode_generation;
 
@@ -41,6 +42,15 @@ void app_mode_set_competition_indicator(uint8_t failed_step, bool ready)
         s_indicator_epoch_ms = esp_timer_get_time() / 1000;
     s_failed_step = failed_step;
     s_competition_ready = ready;
+    taskEXIT_CRITICAL(&s_mode_lock);
+}
+
+void app_mode_set_heading_uncalibrated(bool uncalibrated)
+{
+    taskENTER_CRITICAL(&s_mode_lock);
+    if (s_heading_uncalibrated != uncalibrated)
+        s_indicator_epoch_ms = esp_timer_get_time() / 1000;
+    s_heading_uncalibrated = uncalibrated;
     taskEXIT_CRITICAL(&s_mode_lock);
 }
 
@@ -65,6 +75,7 @@ static void toggle_mode(void)
     const app_mode_t mode = s_mode;
     s_failed_step = 0;
     s_competition_ready = false;
+    s_heading_uncalibrated = false;
     s_indicator_epoch_ms = esp_timer_get_time() / 1000;
     taskEXIT_CRITICAL(&s_mode_lock);
     navigation_service_cancel(NAVIGATION_CANCEL_MODE);
@@ -79,6 +90,7 @@ static void set_indicator(uint8_t pulse)
     const app_mode_t mode = s_mode;
     const uint8_t failed = s_failed_step;
     const bool ready = s_competition_ready;
+    const bool uncalibrated = s_heading_uncalibrated;
     const int64_t epoch = s_indicator_epoch_ms;
     taskEXIT_CRITICAL(&s_mode_lock);
     if (mode == APP_MODE_TEST) {
@@ -89,6 +101,9 @@ static void set_indicator(uint8_t pulse)
         if (elapsed < (uint32_t)failed * 400U && elapsed % 400U < 200U) red = 72;
     } else if (!ready) {
         /* Indicador apagado mientras la verificación está en curso. */
+    } else if (uncalibrated &&
+               (uint32_t)(esp_timer_get_time() / 1000 - epoch) % 1000U >= 500U) {
+        /* El color del rover parpadea a 1 Hz si el rumbo no quedó calibrado. */
     } else if (s_identity == APP_STORAGE_ROVER_10) {
         red = 72; green = 46;
     } else if (s_identity == APP_STORAGE_ROVER_11) {

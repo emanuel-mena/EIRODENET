@@ -20,6 +20,7 @@
 #include "navigation_service.h"
 #include "peer_comms_service.h"
 #include "rover_service.h"
+#include "vision_service.h"
 
 #define STATIC_PARTITION_LABEL "static"
 #define STATIC_BASE_PATH "/static"
@@ -188,6 +189,8 @@ static esp_err_t state_handler(httpd_req_t *request)
     cJSON_AddNumberToObject(pose_json, "uncertainty_cells", navigation.uncertainty_cells);
     cJSON_AddNumberToObject(pose_json, "vision_heading_offset_deg",
                             navigation.vision_heading_offset_deg);
+    cJSON_AddBoolToObject(pose_json, "vision_heading_calibrated",
+                          navigation.vision_heading_calibrated);
     cJSON *vision_json = cJSON_AddObjectToObject(nav_json, "vision");
     cJSON_AddBoolToObject(vision_json, "configured", navigation.vision_configured);
     cJSON_AddBoolToObject(vision_json, "connected", navigation.vision_connected);
@@ -285,6 +288,19 @@ static esp_err_t peer_state_handler(httpd_req_t *request)
     cJSON_AddNumberToObject(navigation, "col", peer.navigation_col);
     cJSON_AddNumberToObject(navigation, "row", peer.navigation_row);
     cJSON_AddNumberToObject(navigation, "request_id", peer.navigation_request_id);
+    vision_status_t vision = {0};
+    vision_service_get_status(&vision);
+    const bool peer_pose_valid = vision.peer_valid && vision.peer_id == peer.rover_id;
+    float peer_heading = vision.peer_theta_deg + peer.vision_heading_offset_deg;
+    while (peer_heading > 180.0f) peer_heading -= 360.0f;
+    while (peer_heading <= -180.0f) peer_heading += 360.0f;
+    cJSON *pose = cJSON_AddObjectToObject(navigation, "pose");
+    cJSON_AddBoolToObject(pose, "valid", peer_pose_valid);
+    cJSON_AddNumberToObject(pose, "col", peer_pose_valid ? vision.peer_col : 0.0f);
+    cJSON_AddNumberToObject(pose, "row", peer_pose_valid ? vision.peer_row : 0.0f);
+    cJSON_AddNumberToObject(pose, "theta_deg", peer_pose_valid ? peer_heading : 0.0f);
+    cJSON_AddNumberToObject(pose, "vision_heading_offset_deg", peer.vision_heading_offset_deg);
+    cJSON_AddBoolToObject(pose, "vision_heading_calibrated", peer.vision_heading_calibrated);
     cJSON *route = cJSON_AddObjectToObject(navigation, "route");
     cJSON_AddNumberToObject(route, "cell_col", peer.navigation_cell_col);
     cJSON_AddNumberToObject(route, "cell_row", peer.navigation_cell_row);

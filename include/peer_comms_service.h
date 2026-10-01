@@ -45,6 +45,8 @@ typedef struct {
     int16_t navigation_cell_row;
     uint8_t navigation_heading_index;
     float navigation_heading_deg;
+    float vision_heading_offset_deg;
+    bool vision_heading_calibrated;
     float navigation_waypoint_col;
     float navigation_waypoint_row;
     uint16_t navigation_segment_count;

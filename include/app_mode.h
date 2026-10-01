@@ -16,3 +16,5 @@ const char *app_mode_name(app_mode_t mode);
 
 /** Actualiza la indicación de la verificación de competencia (0 = en curso, 1..5 = fallo). */
 void app_mode_set_competition_indicator(uint8_t failed_step, bool ready);
+/** Parpadea en el color de identidad si la competencia continúa sin calibración angular. */
+void app_mode_set_heading_uncalibrated(bool uncalibrated);

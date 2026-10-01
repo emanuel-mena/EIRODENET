@@ -54,6 +54,7 @@ typedef struct {
     float angular_speed_dps;
     float uncertainty_cells;
     float vision_heading_offset_deg;
+    bool vision_heading_calibrated;
     bool vision_configured;
     bool vision_connected;
     bool vision_fresh;
@@ -87,3 +88,5 @@ esp_err_t navigation_service_submit_competition(float col, float row, uint32_t *
 void navigation_service_set_competition_cube(uint8_t color, bool allow_contact);
 esp_err_t navigation_service_cancel(navigation_cancel_reason_t reason);
 void navigation_service_get_status(navigation_status_t *status);
+/** Instala o borra el desfase de visión para la entrada actual en competencia. */
+void navigation_service_set_heading_calibration(float offset_deg, bool calibrated);

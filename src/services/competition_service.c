@@ -8,7 +8,9 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "heading_calibration.h"
 #include "motor_adapter.h"
+#include "navigation_service.h"
 #include "peer_comms_service.h"
 #include "rover_service.h"
 #include "vision_service.h"
@@ -17,6 +19,7 @@
 #define SERVER_DATA_WAIT_MS 5000
 #define PEER_WAIT_MS 5000
 #define PEER_RETRY_MS 200
+#define HEADING_CALIBRATION_WAIT_MS 3000
 
 static const char *TAG = "competition";
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -183,26 +186,86 @@ static void verify(uint32_t generation)
             ? COMPETITION_ROLE_COMMANDER : COMPETITION_ROLE_SOLDIER, ESP_OK);
 }
 
+static void calibrate_heading(uint32_t generation)
+{
+    heading_calibration_sample_t samples[HEADING_CALIBRATION_SAMPLES] = {0};
+    uint8_t count = 0;
+    const int64_t deadline_ms = esp_timer_get_time() / 1000 + HEADING_CALIBRATION_WAIT_MS;
+    motor_adapter_stop();
+    while (active(generation) && esp_timer_get_time() / 1000 < deadline_ms) {
+        vision_status_t vision = {0};
+        vision_service_get_status(&vision);
+        if (vision.phase != VISION_PHASE_READY) break;
+        if (vision.connected && vision.protocol_valid && vision.pose_valid &&
+            vision.age_ms <= HEADING_CALIBRATION_MAX_AGE_MS &&
+            vision.frame_timestamp_ms != 0 &&
+            (count == 0 || vision.frame_timestamp_ms > samples[count - 1].frame_timestamp_ms)) {
+            samples[count++] = (heading_calibration_sample_t){
+                .frame_timestamp_ms = vision.frame_timestamp_ms,
+                .age_ms = vision.age_ms,
+                .col = vision.col,
+                .row = vision.row,
+                .theta_deg = vision.theta_deg,
+            };
+            if (count == HEADING_CALIBRATION_SAMPLES) break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (!active(generation)) return;
+    vision_status_t latest = {0};
+    vision_service_get_status(&latest);
+    float offset_deg = 0.0f;
+    const bool calibrated = latest.phase == VISION_PHASE_READY &&
+        count == HEADING_CALIBRATION_SAMPLES &&
+        heading_calibration_calculate(samples, &offset_deg);
+    navigation_service_set_heading_calibration(offset_deg, calibrated);
+    app_mode_set_heading_uncalibrated(!calibrated);
+    if (calibrated)
+        ESP_LOGI(TAG, "Rumbo calibrado con 5 capturas: desfase %+.2f grados", (double)offset_deg);
+    else
+        ESP_LOGW(TAG, "Rumbo sin calibrar (%u/5 capturas); se usa theta del servidor",
+                 (unsigned)count);
+}
+
 static void competition_task(void *argument)
 {
     (void)argument;
     uint32_t handled_generation = UINT32_MAX;
+    bool heading_attempted = false;
     while (true) {
         const app_mode_t mode = app_mode_get();
         const uint32_t generation = app_mode_generation();
         if (mode == APP_MODE_COMPETITION && generation != handled_generation) {
             handled_generation = generation;
+            heading_attempted = false;
+            navigation_service_set_heading_calibration(0.0f, false);
+            app_mode_set_heading_uncalibrated(false);
             verify(generation);
         } else if (mode == APP_MODE_TEST && generation != handled_generation) {
             handled_generation = generation;
+            heading_attempted = false;
+            navigation_service_set_heading_calibration(0.0f, false);
+            app_mode_set_heading_uncalibrated(false);
             competition_runtime_reset();
             peer_comms_service_reset_verification();
             publish(0, 0, false, COMPETITION_ROLE_NONE, ESP_OK);
         } else if (mode == APP_MODE_COMPETITION) {
             competition_status_t status = {0};
             competition_service_get_status(&status);
-            if (status.ready && !status.failed_step)
-                competition_runtime_tick(status.role, generation);
+            if (status.ready && !status.failed_step) {
+                vision_status_t vision = {0};
+                vision_service_get_status(&vision);
+                if (!heading_attempted && vision.phase == VISION_PHASE_READY) {
+                    heading_attempted = true;
+                    calibrate_heading(generation);
+                } else if (!heading_attempted && vision.phase == VISION_PHASE_RUNNING) {
+                    heading_attempted = true;
+                    app_mode_set_heading_uncalibrated(true);
+                    ESP_LOGW(TAG, "READY termino antes de calibrar; se usa theta del servidor");
+                }
+                if (heading_attempted && active(generation))
+                    competition_runtime_tick(status.role, generation);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }

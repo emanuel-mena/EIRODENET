@@ -20,7 +20,7 @@
 #include "vision_service.h"
 
 #define PEER_MAGIC 0x524f4952U
-#define PEER_PROTOCOL_VERSION 5U
+#define PEER_PROTOCOL_VERSION 6U
 #define PEER_STATE_PERIOD_MS 200U
 #define PEER_TIMEOUT_MS 1500U
 
@@ -56,6 +56,7 @@ typedef struct {
     uint8_t navigation_blind_crossings;
     uint8_t navigation_wait_reason;
     float navigation_heading_deg;
+    float vision_heading_offset_deg;
     float navigation_waypoint_col;
     float navigation_waypoint_row;
     uint16_t navigation_segment_count;
@@ -163,7 +164,8 @@ static void send_local_state(void)
                    (sensors.ultrasonic_valid ? 4U : 0U) |
                    (sensors.infrared_valid ? 8U : 0U) |
                    (sensors.color_valid ? 16U : 0U) |
-                   (navigation.has_target ? 32U : 0U);
+                   (navigation.has_target ? 32U : 0U) |
+                   (navigation.vision_heading_calibrated ? 64U : 0U);
     state->rssi = wifi.rssi;
     state->navigation_phase = (uint8_t)navigation.phase;
     state->temperature_c = imu.sample.temperature_c;
@@ -184,6 +186,7 @@ static void send_local_state(void)
     state->navigation_cell_row = navigation.confirmed_cell_row;
     state->navigation_heading_index = navigation.heading_index;
     state->navigation_heading_deg = navigation.desired_heading_deg;
+    state->vision_heading_offset_deg = navigation.vision_heading_offset_deg;
     state->navigation_waypoint_col = navigation.waypoint_col;
     state->navigation_waypoint_row = navigation.waypoint_row;
     state->navigation_segment_count = navigation.route_segment_count;
@@ -225,6 +228,11 @@ static void accept_state(const peer_packet_t *packet)
     s_status.navigation_cell_row = state->navigation_cell_row;
     s_status.navigation_heading_index = state->navigation_heading_index;
     s_status.navigation_heading_deg = state->navigation_heading_deg;
+    s_status.vision_heading_calibrated = (state->flags & 64U) != 0 &&
+        isfinite(state->vision_heading_offset_deg) &&
+        fabsf(state->vision_heading_offset_deg) <= 180.0f;
+    s_status.vision_heading_offset_deg = s_status.vision_heading_calibrated
+        ? state->vision_heading_offset_deg : 0.0f;
     s_status.navigation_waypoint_col = state->navigation_waypoint_col;
     s_status.navigation_waypoint_row = state->navigation_waypoint_row;
     s_status.navigation_segment_count = state->navigation_segment_count;
@@ -525,6 +533,8 @@ void peer_comms_service_reset_verification(void)
     s_status.mission_ack_id = 0;
     s_status.mission_ack_fragment = 0;
     s_status.mission_ack_accepted = false;
+    s_status.vision_heading_offset_deg = 0.0f;
+    s_status.vision_heading_calibrated = false;
     xSemaphoreGive(s_lock);
 }
 

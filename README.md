@@ -281,7 +281,7 @@ npm run dev
 La página sólo se conecta por HTTP al rover que la sirve, sin asumir nombres como
 `rover-10.local` o `rover-11.local`. Ese rover expone su propio estado y actúa como
 puente hacia el compañero mediante ESP-NOW y la MAC guardada en `peer_mac`. Ambos
-rovers publican un paquete binario de estado ESP-NOW v5 cada 200 ms, incluida la
+rovers publican un paquete binario de estado ESP-NOW v6 cada 200 ms, incluida la
 ruta discreta; tras 1500 ms sin paquetes,
 el panel del compañero se marca desconectado y bloquea telemetría y comandos. Por
 eso se puede abrir, por ejemplo, `http://cecilio.local` y operar ambos paneles sin
@@ -299,11 +299,23 @@ con un segundo de pausa entre grupos. En éxito conserva ámbar para Rover 10 y
 violeta para Rover 11. El estado HTTP expone `competition_check` con paso, error,
 resultado y función.
 
+Durante la primera fase `READY` posterior a esa verificación, cada rover permanece
+detenido hasta tres segundos para reunir cinco poses propias frescas con capturas
+distintas. Si está quieto y mirando desde la salida del lado izquierdo hacia el
+interior, calcula una sola vez el desfase entre el rumbo visual medio y 0 grados.
+Lo aplica únicamente a la orientación, lo comunica al compañero en el estado
+ESP-NOW y lo muestra en `navigation.pose` como `vision_heading_offset_deg` y
+`vision_heading_calibrated`. Si faltan muestras, varían demasiado o termina
+`READY`, continúa con el rumbo del servidor y `vision_heading_calibrated=false`.
+En ese caso, el NeoPixel parpadea a 1 Hz en el color de identidad del rover
+(ámbar para Rover 10, violeta para Rover 11); una calibración válida lo deja fijo.
+Los destellos rojos siguen reservados para fallos de verificación.
+
 | Destellos rojos por grupo | Paso fallido | Qué significa y qué revisar |
 |---:|---|---|
 | 1 | Wi-Fi | El rover no obtuvo conexión con dirección IPv4 en 15 segundos. Revise las credenciales, el punto de acceso y la asignación de IP. |
 | 2 | Datos del servidor | No llegó una trama válida del servidor TCP en 5 segundos. Revise `server_ipv4`, `server_port`, la conexión de red y el contrato v2. No se requiere que el servidor responda a ping. |
-| 3 | Enlace ESP-NOW | No llegó la respuesta del compañero en 5 segundos. Revise su alimentación, la MAC `peer_mac`, el canal Wi-Fi y que ambos tengan el protocolo ESP-NOW v5. |
+| 3 | Enlace ESP-NOW | No llegó la respuesta del compañero en 5 segundos. Revise su alimentación, la MAC `peer_mac`, el canal Wi-Fi y que ambos tengan el protocolo ESP-NOW v6. |
 | 4 | `WHO_AM_I` | No llegó la identidad en 5 segundos, es inválida o coincide con la propia. Configure uno como Rover 10 y el otro como Rover 11. |
 | 5 | Comparación de MAC | No se pudo leer la MAC STA propia, falta la MAC del compañero o ambas son iguales. Revise `peer_mac` en la configuración. |
 
