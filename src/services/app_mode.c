@@ -67,12 +67,11 @@ const char *app_mode_name(app_mode_t mode)
     return mode == APP_MODE_COMPETITION ? "competition" : "test";
 }
 
-static void toggle_mode(void)
+static void change_mode(app_mode_t mode)
 {
     taskENTER_CRITICAL(&s_mode_lock);
-    s_mode = s_mode == APP_MODE_TEST ? APP_MODE_COMPETITION : APP_MODE_TEST;
+    s_mode = mode;
     ++s_mode_generation;
-    const app_mode_t mode = s_mode;
     s_failed_step = 0;
     s_competition_ready = false;
     s_heading_uncalibrated = false;
@@ -80,7 +79,19 @@ static void toggle_mode(void)
     taskEXIT_CRITICAL(&s_mode_lock);
     navigation_service_cancel(NAVIGATION_CANCEL_MODE);
     motor_adapter_stop();
-    ESP_LOGW(TAG, "Modo cambiado con BOOT: %s", app_mode_name(mode));
+    ESP_LOGW(TAG, "Modo cambiado: %s", app_mode_name(mode));
+}
+
+esp_err_t app_mode_enter_competition(void)
+{
+    if (app_mode_get() != APP_MODE_TEST) return ESP_ERR_INVALID_STATE;
+    change_mode(APP_MODE_COMPETITION);
+    return ESP_OK;
+}
+
+static void toggle_mode(void)
+{
+    change_mode(app_mode_get() == APP_MODE_TEST ? APP_MODE_COMPETITION : APP_MODE_TEST);
 }
 
 static void set_indicator(uint8_t pulse)

@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import './style.css'
+import { competitionEligibility, mergeDiagnostics } from './console_state.js'
 
 const roverIds = [10, 11]
 
@@ -12,7 +13,11 @@ document.querySelector('#app').innerHTML = `
     <section class="hero">
       <p class="kicker">DOS ROVERS · UNA CONSOLA</p>
       <h1>Telemetría y control<br><em>en tiempo real.</em></h1>
-      <p>El modo sólo cambia físicamente con el botón BOOT de cada rover. En competencia, la consola queda en sólo lectura.</p>
+      <p>Inicia la competencia desde esta consola cuando ambos rovers y el servidor de visión estén listos. BOOT también permite cambiar el modo en cada rover.</p>
+    </section>
+    <section class="competition-panel" aria-labelledby="competition-title">
+      <div><p class="kicker">PANEL DE INICIO</p><h2 id="competition-title">Modo competencia</h2><p id="competition-status" role="status">Esperando estado de ambos rovers</p></div>
+      <button id="competition-enter" type="button" disabled>Entrar en competencia</button>
     </section>
     <section class="rovers">${roverIds.map(id => roverCard(id)).join('')}</section>
   </main>
@@ -36,19 +41,69 @@ function roverCard(id) {
         <button data-drive="forward" aria-label="Avanzar">↑</button><button data-drive="left" aria-label="Girar izquierda">←</button><button data-drive="stop" class="stop" aria-label="Detener">■</button><button data-drive="right" aria-label="Girar derecha">→</button><button data-drive="back" aria-label="Retroceder">↓</button>
       </div><small class="hint">Mantén presionado · parada automática en 500 ms</small></div>
       <form class="target-form"><p class="section-label">OBJETIVO DE NAVEGACIÓN</p><div><label>Col <input name="col" type="number" min="0" step="0.1" required></label><label>Fila <input name="row" type="number" min="0" step="0.1" required></label></div><button type="submit">Navegar al punto</button><button type="button" class="cancel-navigation">Cancelar y detener</button><small class="nav-state">Esperando pose de visión</small><div class="nav-telemetry"><span data-nav="pose">Pose —</span><span data-nav="speed">Velocidad —</span><span data-nav="vision">Visión —</span><span data-nav="grid">Cuadrícula —</span><span data-nav="route">Ruta —</span><span data-nav="waypoint">Waypoint —</span></div></form></section>
-    </fieldset></article>`
+    </fieldset>
+    <section class="diagnostics" aria-label="Diagnóstico del Rover ${id}">
+      <div class="diagnostics-head"><div><p class="section-label">REGISTRO LOCAL · ROVER ${id}</p><small class="diagnostics-reset">Sin datos de arranque</small></div><small class="diagnostics-count">0 / 100 líneas</small></div>
+      <div class="diagnostics-latest"><small>ÚLTIMO MENSAJE SERIAL</small><pre>Esperando mensajes del firmware</pre></div>
+      <details><summary>Ver historial</summary><ol class="diagnostics-list"></ol></details>
+    </section></article>`
 }
 
 const driveCommands = { forward: [700, 700], back: [-700, -700], left: [-700, 700], right: [700, -700], stop: [0, 0] }
 const rovers = new Map()
 for (const id of roverIds) {
   const element = document.querySelector(`#rover-${id}`)
-  const state = { id, element, base: null, online: false, busy: false, driveTimer: null }
+  const state = { id, element, base: null, online: false, busy: false, diagBusy: false,
+    mode: null, visionRecent: false, visionExpiresAt: 0, driveTimer: null, logEntries: readStoredLogs(id),
+    bootId: null, resetReason: null }
   state.orientation = makeOrientation(element.querySelector('.arrow'), id)
   rovers.set(id, state)
   element.querySelector('.target-form').addEventListener('submit', event => sendTarget(event, state))
   element.querySelector('.cancel-navigation').addEventListener('click', () => cancelNavigation(state))
   for (const button of element.querySelectorAll('[data-drive]')) bindDrive(button, state)
+  renderDiagnostics(state)
+}
+
+const competitionButton = document.querySelector('#competition-enter')
+let competitionPending = false
+competitionButton.addEventListener('click', enterCompetition)
+
+function renderCompetitionStatus() {
+  const gate = currentCompetitionGate()
+  competitionButton.disabled = !gate.enabled || competitionPending
+  document.querySelector('#competition-status').textContent = competitionPending
+    ? 'Enviando orden y esperando confirmación del compañero…' : gate.reason
+}
+
+function currentCompetitionGate() {
+  const now = performance.now()
+  return competitionEligibility([...rovers.values()].map(rover => ({
+    id: rover.id, online: rover.online, mode: rover.mode,
+    visionRecent: rover.visionRecent && now < rover.visionExpiresAt,
+  })))
+}
+
+async function enterCompetition() {
+  if (competitionPending || !currentCompetitionGate().enabled) return
+  const host = [...rovers.values()].find(rover => rover.base === '/api/v1')
+  if (!host) return
+  competitionPending = true; renderCompetitionStatus()
+  try {
+    const response = await fetch('/api/v1/competition/enter', { method: 'POST' })
+    const data = await response.json()
+    if (!response.ok || !data.ok) {
+      const labels = { peer_offline: 'sin enlace ESP-NOW', test_mode_required: 'fuera de modo prueba',
+        server_data_stale: 'sin datos recientes del servidor', peer_confirmation_failed: 'sin confirmación del compañero',
+        mixed_mode: 'estado mixto; usa BOOT para volver ambos a prueba' }
+      throw new Error(`Rover ${data.rover_id || '—'}: ${labels[data.code] || data.code || `HTTP ${response.status}`}`)
+    }
+    notify('Ambos rovers entraron en competencia')
+  } catch (error) { notify(`No se pudo iniciar competencia: ${error.message}`) }
+  finally {
+    competitionPending = false
+    await Promise.all([...rovers.values()].map(poll))
+    renderCompetitionStatus()
+  }
 }
 
 function makeOrientation(container, id) {
@@ -74,9 +129,11 @@ function makeOrientation(container, id) {
 
 function setOnline(rover, online, label = online ? 'En línea' : 'Sin conexión') {
   if (!online && rover.online) clearTelemetry(rover)
+  if (!online) { rover.mode = null; rover.visionRecent = false; rover.visionExpiresAt = 0 }
   rover.online = online; rover.element.dataset.online = String(online)
   rover.element.querySelector('fieldset').disabled = !online
   rover.element.querySelector('.connection span').textContent = label
+  renderCompetitionStatus()
 }
 
 function clearTelemetry(rover) {
@@ -107,6 +164,9 @@ async function poll(rover) {
 
 function updateRover(rover, data) {
   const e = rover.element; const competition = data.mode === 'competition'
+  rover.mode = data.mode
+  rover.visionRecent = data.vision_stream?.recent === true
+  rover.visionExpiresAt = performance.now() + Math.max(0, 750 - Number(data.vision_stream?.age_ms || 750))
   e.dataset.mode = data.mode
   e.querySelector('.mode-pill').textContent = competition ? 'COMPETENCIA' : 'PRUEBA'
   e.querySelector('.ip').textContent = data.network.ipv4; e.querySelector('.rssi').textContent = `${data.network.rssi} dBm`
@@ -138,6 +198,57 @@ function updateRover(rover, data) {
   e.querySelector('[data-nav="waypoint"]').textContent = Number.isFinite(route.waypoint_col)
     ? `WP ${route.waypoint_col.toFixed(2)},${route.waypoint_row.toFixed(2)} · sin visión ${route.blind_crossings || 0}/2 · replans ${route.replans || 0}`
     : 'Waypoint —'
+  renderCompetitionStatus()
+}
+
+function readStoredLogs(id) {
+  try {
+    const value = JSON.parse(localStorage.getItem(`eirodenet:logs:${id}`) || '[]')
+    return Array.isArray(value) ? value.slice(-100) : []
+  } catch { return [] }
+}
+
+function resetReasonLabel(reason) {
+  const labels = { 1: 'Encendido', 2: 'Reinicio externo', 3: 'Reinicio por software',
+    4: 'Pánico', 5: 'Watchdog de interrupción', 6: 'Watchdog de tarea',
+    7: 'Watchdog', 8: 'Sueño profundo', 9: 'Caída de voltaje' }
+  return labels[reason] || `Código ${reason}`
+}
+
+function renderDiagnostics(rover) {
+  const section = rover.element.querySelector('.diagnostics')
+  const entries = rover.logEntries
+  section.querySelector('.diagnostics-count').textContent = `${entries.length} / 100 líneas`
+  section.querySelector('.diagnostics-reset').textContent = rover.resetReason == null
+    ? 'Sin datos de arranque' : `Arranque #${rover.bootId} · ${resetReasonLabel(rover.resetReason)}`
+  const latest = entries.at(-1)
+  section.querySelector('.diagnostics-latest pre').textContent = latest
+    ? `[${new Date(latest.receivedAt).toLocaleString()} · +${(latest.uptime_ms / 1000).toFixed(1)} s] ${latest.text}`
+    : 'Esperando mensajes del firmware'
+  const list = section.querySelector('.diagnostics-list')
+  list.replaceChildren(...entries.slice().reverse().map(entry => {
+    const row = document.createElement('li')
+    row.textContent = `${new Date(entry.receivedAt).toLocaleString()} · +${(entry.uptime_ms / 1000).toFixed(1)} s · ${entry.text}`
+    return row
+  }))
+}
+
+async function pollDiagnostics(rover) {
+  if (rover.diagBusy || !rover.base) return
+  rover.diagBusy = true
+  try {
+    const response = await fetch(`${rover.base}/diagnostics`, { cache: 'no-store' })
+    if (!response.ok) return
+    const data = await response.json()
+    if (!data.ok || data.rover_id !== rover.id) return
+    const next = mergeDiagnostics(rover.logEntries, data.entries, new Date().toISOString())
+    rover.logEntries = next
+    rover.bootId = data.boot_id
+    rover.resetReason = data.reset_reason
+    try { localStorage.setItem(`eirodenet:logs:${rover.id}`, JSON.stringify(next)) } catch { /* Memoria privada o llena. */ }
+    renderDiagnostics(rover)
+  } catch { /* El último registro guardado sigue visible. */ }
+  finally { rover.diagBusy = false }
 }
 function setText(element, sensor, value) { element.querySelector(`[data-sensor="${sensor}"]`).textContent = value }
 
@@ -176,6 +287,8 @@ setInterval(() => {
   if ([...rovers.values()].some(rover => rover.base)) rovers.forEach(poll)
   else discoverServingRover()
 }, 700)
+setInterval(renderCompetitionStatus, 100)
+setInterval(() => rovers.forEach(pollDiagnostics), 1500)
 discoverServingRover()
 
 async function discoverServingRover() {
@@ -188,11 +301,13 @@ async function discoverServingRover() {
     rover.base = '/api/v1'
     rover.element.querySelector('.transport strong').textContent = `HTTP local · ${window.location.host}`
     setOnline(rover, true); updateRover(rover, data)
+    pollDiagnostics(rover)
     const peerId = rover.id === 10 ? 11 : 10
     const peer = rovers.get(peerId)
     peer.base = '/api/v1/peer'
     peer.element.querySelector('.transport strong').textContent = 'ESP-NOW · MAC configurada'
     poll(peer)
+    pollDiagnostics(peer)
   } catch { /* El servidor de desarrollo no expone la API del ESP32. */ }
   finally { discovering = false }
 }

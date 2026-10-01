@@ -6,6 +6,7 @@
 #include "app_mode.h"
 #include "app_storage.h"
 #include "competition_runtime.h"
+#include "diagnostics_service.h"
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_timer.h"
@@ -20,7 +21,7 @@
 #include "vision_service.h"
 
 #define PEER_MAGIC 0x524f4952U
-#define PEER_PROTOCOL_VERSION 6U
+#define PEER_PROTOCOL_VERSION 7U
 #define PEER_STATE_PERIOD_MS 200U
 #define PEER_TIMEOUT_MS 1500U
 
@@ -34,6 +35,10 @@ typedef enum {
     PEER_MESSAGE_IDENTITY_REPLY = 7,
     PEER_MESSAGE_MISSION = 8,
     PEER_MESSAGE_MISSION_ACK = 9,
+    PEER_MESSAGE_COMPETITION_ENTER = 10,
+    PEER_MESSAGE_COMPETITION_ACK = 11,
+    PEER_MESSAGE_LOG = 12,
+    PEER_MESSAGE_LOG_ACK = 13,
 } peer_message_type_t;
 
 typedef struct {
@@ -66,6 +71,10 @@ typedef struct {
     int16_t drive_right;
     uint8_t competition_delivered_mask;
     uint8_t competition_available;
+    uint8_t vision_recent;
+    uint16_t vision_frame_age_ms;
+    uint32_t boot_id;
+    uint8_t reset_reason;
 } peer_state_payload_t;
 
 typedef struct {
@@ -85,6 +94,9 @@ typedef struct {
             peer_mission_point_t points[PEER_MISSION_FRAGMENT_POINTS];
         } mission;
         struct { uint32_t id; uint8_t fragment, accepted; } mission_ack;
+        struct { uint32_t nonce; uint8_t accepted, reason; } mode;
+        diagnostic_entry_t log;
+        struct { uint32_t boot_id, sequence; } log_ack;
     } payload;
 } peer_packet_t;
 
@@ -108,6 +120,22 @@ static peer_mission_t s_mission;
 static uint8_t s_mission_fragments;
 static uint8_t s_mission_next_fragment;
 static bool s_mission_complete;
+static uint32_t s_last_mode_nonce;
+static uint32_t s_forwarded_log_sequence;
+static uint32_t s_pending_log_sequence;
+static uint32_t s_pending_log_boot_id;
+static int64_t s_next_log_retry_ms;
+
+static bool recent_vision(uint32_t *age_ms)
+{
+    vision_status_t vision = {0};
+    vision_service_get_status(&vision);
+    const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    const uint64_t age = vision.last_valid_frame_ms != 0 && now_ms >= vision.last_valid_frame_ms
+        ? now_ms - vision.last_valid_frame_ms : UINT32_MAX;
+    if (age_ms != NULL) *age_ms = age > UINT32_MAX ? UINT32_MAX : (uint32_t)age;
+    return vision.connected && vision.protocol_valid && age <= 750;
+}
 
 static bool valid_identity(uint8_t identity)
 {
@@ -198,6 +226,11 @@ static void send_local_state(void)
     state->drive_right = drive.right;
     state->competition_delivered_mask = competition_runtime_delivered_mask();
     state->competition_available = competition_runtime_available();
+    uint32_t frame_age = UINT32_MAX;
+    state->vision_recent = recent_vision(&frame_age);
+    state->vision_frame_age_ms = frame_age > UINT16_MAX ? UINT16_MAX : (uint16_t)frame_age;
+    state->boot_id = diagnostics_boot_id();
+    state->reset_reason = (uint8_t)diagnostics_reset_reason();
     send_packet(&packet);
 }
 
@@ -205,6 +238,12 @@ static void accept_state(const peer_packet_t *packet)
 {
     const peer_state_payload_t *state = &packet->payload.state;
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_status.boot_id != 0 && state->boot_id != 0 &&
+        s_status.boot_id != state->boot_id) {
+        s_forwarded_log_sequence = 0;
+        s_pending_log_sequence = 0;
+        s_next_log_retry_ms = 0;
+    }
     s_status.rover_id = packet->source_id;
     s_status.timestamp_ms = state->timestamp_ms;
     s_status.mode = state->mode;
@@ -244,6 +283,10 @@ static void accept_state(const peer_packet_t *packet)
     s_status.drive_right = state->drive_right;
     s_status.competition_delivered_mask = state->competition_delivered_mask;
     s_status.competition_available = state->competition_available != 0;
+    s_status.vision_recent = state->vision_recent != 0;
+    s_status.vision_frame_age_ms = state->vision_frame_age_ms;
+    s_status.boot_id = state->boot_id;
+    s_status.reset_reason = state->reset_reason;
     s_last_seen_ms = esp_timer_get_time() / 1000;
     s_status.connected = true;
     s_status.last_error = ESP_OK;
@@ -283,6 +326,50 @@ static void handle_received(const received_packet_t *received)
     }
     if (!valid_identity(received->packet.source_id) ||
         received->packet.source_id == s_own_id) return;
+    if (received->packet.type == PEER_MESSAGE_LOG) {
+        diagnostics_store_peer(&received->packet.payload.log);
+        peer_packet_t reply = {.type = PEER_MESSAGE_LOG_ACK};
+        reply.payload.log_ack.boot_id = received->packet.payload.log.boot_id;
+        reply.payload.log_ack.sequence = received->packet.payload.log.sequence;
+        send_packet(&reply);
+        return;
+    }
+    if (received->packet.type == PEER_MESSAGE_LOG_ACK) {
+        if (received->packet.payload.log_ack.boot_id == s_pending_log_boot_id &&
+            received->packet.payload.log_ack.sequence == s_pending_log_sequence) {
+            s_forwarded_log_sequence = s_pending_log_sequence;
+            s_pending_log_sequence = 0;
+        }
+        return;
+    }
+    if (received->packet.type == PEER_MESSAGE_COMPETITION_ACK) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_status.mode_ack_nonce = received->packet.payload.mode.nonce;
+        s_status.mode_ack_accepted = received->packet.payload.mode.accepted != 0;
+        s_status.mode_ack_reason = received->packet.payload.mode.reason;
+        xSemaphoreGive(s_lock);
+        return;
+    }
+    if (received->packet.type == PEER_MESSAGE_COMPETITION_ENTER) {
+        const uint32_t nonce = received->packet.payload.mode.nonce;
+        uint8_t reason = 0;
+        bool accepted = nonce != 0 && s_last_mode_nonce == nonce &&
+            app_mode_get() == APP_MODE_COMPETITION;
+        if (!accepted) {
+            if (app_mode_get() != APP_MODE_TEST) reason = 1;
+            else if (!recent_vision(NULL)) reason = 2;
+            else if (app_mode_enter_competition() == ESP_OK) {
+                accepted = true;
+                s_last_mode_nonce = nonce;
+            } else reason = 1;
+        }
+        peer_packet_t reply = {.type = PEER_MESSAGE_COMPETITION_ACK};
+        reply.payload.mode.nonce = nonce;
+        reply.payload.mode.accepted = accepted;
+        reply.payload.mode.reason = reason;
+        send_packet(&reply);
+        return;
+    }
     if (received->packet.type == PEER_MESSAGE_MISSION_ACK) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_status.mission_ack_id = received->packet.payload.mission_ack.id;
@@ -426,6 +513,17 @@ static void peer_task(void *argument)
             send_local_state();
             next_state_ms = now_ms + PEER_STATE_PERIOD_MS;
         }
+        if (initialized && now_ms >= s_next_log_retry_ms) {
+            diagnostic_entry_t entry;
+            if (diagnostics_local_next(s_forwarded_log_sequence, &entry)) {
+                peer_packet_t log_packet = {.type = PEER_MESSAGE_LOG};
+                log_packet.payload.log = entry;
+                s_pending_log_sequence = entry.sequence;
+                s_pending_log_boot_id = entry.boot_id;
+                send_packet(&log_packet);
+                s_next_log_retry_ms = now_ms + 100;
+            }
+        }
         xSemaphoreTake(s_lock, portMAX_DELAY);
         if (s_status.connected && now_ms - s_last_seen_ms > PEER_TIMEOUT_MS) s_status.connected = false;
         xSemaphoreGive(s_lock);
@@ -484,6 +582,34 @@ esp_err_t peer_comms_service_send_target(float col, float row)
     packet.payload.target.col = col;
     packet.payload.target.row = row;
     return send_packet(&packet);
+}
+
+esp_err_t peer_comms_service_request_competition(uint8_t *reason)
+{
+    peer_comms_status_t peer = {0};
+    peer_comms_service_get_status(&peer);
+    if (!peer.connected || peer.mode != APP_MODE_TEST) return ESP_ERR_INVALID_STATE;
+    const uint32_t nonce = (uint32_t)esp_timer_get_time() | 1U;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_status.mode_ack_nonce = 0;
+    s_status.mode_ack_accepted = false;
+    s_status.mode_ack_reason = 0;
+    xSemaphoreGive(s_lock);
+    peer_packet_t request = {.type = PEER_MESSAGE_COMPETITION_ENTER};
+    request.payload.mode.nonce = nonce;
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        const esp_err_t sent = send_packet(&request);
+        if (sent != ESP_OK) return sent;
+        for (int wait = 0; wait < 10; ++wait) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            peer_comms_service_get_status(&peer);
+            if (peer.mode_ack_nonce == nonce) {
+                if (reason != NULL) *reason = peer.mode_ack_reason;
+                return peer.mode_ack_accepted ? ESP_OK : ESP_ERR_INVALID_STATE;
+            }
+        }
+    }
+    return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t peer_comms_service_send_mission_fragment(const peer_mission_t *mission, uint8_t fragment)

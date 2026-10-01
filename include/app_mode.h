@@ -11,6 +11,8 @@ typedef enum {
 
 esp_err_t app_mode_start(uint8_t rover_identity);
 app_mode_t app_mode_get(void);
+/** Entra en competencia sin alternar; detiene motores y cancela navegación. */
+esp_err_t app_mode_enter_competition(void);
 uint32_t app_mode_generation(void);
 const char *app_mode_name(app_mode_t mode);
 

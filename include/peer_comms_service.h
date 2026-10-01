@@ -25,6 +25,10 @@ typedef struct {
     esp_err_t last_error;
     uint32_t timestamp_ms;
     uint8_t mode;
+    bool vision_recent;
+    uint32_t vision_frame_age_ms;
+    uint32_t boot_id;
+    uint8_t reset_reason;
     bool imu_valid;
     bool imu_calibrated;
     float temperature_c;
@@ -64,6 +68,9 @@ typedef struct {
     bool mission_ack_accepted;
     uint8_t competition_delivered_mask;
     bool competition_available;
+    uint32_t mode_ack_nonce;
+    bool mode_ack_accepted;
+    uint8_t mode_ack_reason;
 } peer_comms_status_t;
 
 /** Inicia la comunicación ESP-NOW cuando Wi-Fi STA esté operativo. */
@@ -77,6 +84,8 @@ esp_err_t peer_comms_service_send_drive(int16_t left, int16_t right);
 
 /** Envía un objetivo en celdas a la navegación de prueba del compañero. */
 esp_err_t peer_comms_service_send_target(float col, float row);
+/** Solicita entrada a competencia y espera confirmación del compañero. */
+esp_err_t peer_comms_service_request_competition(uint8_t *reason);
 
 /** Reinicia los intercambios de verificación de competencia. */
 void peer_comms_service_reset_verification(void);

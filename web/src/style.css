@@ -21,6 +21,12 @@ main { width: min(1360px, calc(100% - 32px)); margin: 28px auto 60px; }
 h1 { max-width: 900px; margin: 0; font: bold clamp(2.1rem, 5vw, 4.5rem)/.98 'Courier New', monospace; letter-spacing: -.06em; text-shadow: 3px 3px #000; }
 h1 em { color: #ffff00; font-style: normal; }
 .hero > p:last-child { max-width: 760px; margin: 17px 0 0; color: #e3e5ff; font: .9rem/1.45 'Courier New', monospace; }
+.competition-panel { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 0 0 22px; padding: 15px 20px; border: 3px solid; border-color: #fff #444 #444 #fff; background: #c0c0c0; box-shadow: 5px 5px 0 #004747; }
+.competition-panel .kicker { color: #000080; }
+.competition-panel h2 { margin: 0; font: bold 1.3rem 'Courier New', monospace; }
+#competition-status { margin: 7px 0 0; font: .72rem/1.4 'Courier New', monospace; }
+#competition-enter { flex: none; min-height: 44px; padding: 10px 16px; border: 3px solid; border-color: #fff #333 #333 #fff; background: #fff06a; color: #08083e; box-shadow: inset 1px 1px #fff; cursor: pointer; font: bold .8rem 'Courier New', monospace; }
+#competition-enter:active { border-color: #333 #fff #fff #333; transform: translate(1px, 1px); }
 .rovers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; align-items: start; }
 
 .rover { min-width: 0; padding: 5px; border: 3px solid; border-color: #fff #404040 #404040 #fff; background: #c0c0c0; box-shadow: 5px 5px 0 #004747; }
@@ -75,6 +81,18 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .target-form > .cancel-navigation { color: #8b0000; }
 .target-form > .nav-telemetry { display: grid; gap: 4px; margin-top: 10px; padding: 8px; border: 2px solid; border-color: #666 #fff #fff #666; background: #fff; font: .64rem 'Courier New', monospace; }
 .nav-telemetry span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rover .diagnostics { margin: 10px; padding: 10px; border: 2px solid; border-color: #fff #777 #777 #fff; background: #d4d4d4; }
+.diagnostics-head { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
+.diagnostics-head .section-label { margin: 0 0 5px; padding: 4px 6px; background: #000080; color: #fff; }
+.diagnostics-head small { font: .65rem/1.3 'Courier New', monospace; }
+.diagnostics-count { white-space: nowrap; }
+.diagnostics-latest { margin-top: 9px; padding: 8px; border: 2px solid; border-color: #555 #fff #fff #555; background: #040b0a; color: #a9ffba; }
+.diagnostics-latest small { color: #ffff73; font: bold .63rem 'Courier New', monospace; }
+.diagnostics-latest pre { max-height: 100px; margin: 6px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: .7rem/1.4 'Courier New', monospace; }
+.diagnostics details { margin-top: 8px; font: .7rem 'Courier New', monospace; }
+.diagnostics summary { cursor: pointer; font-weight: bold; }
+.diagnostics-list { max-height: 220px; margin: 7px 0 0; padding: 8px 8px 8px 28px; overflow: auto; border: 2px solid; border-color: #777 #fff #fff #777; background: #fff; }
+.diagnostics-list li { margin: 0 0 5px; overflow-wrap: anywhere; }
 button:disabled, input:disabled { cursor: not-allowed !important; opacity: .5 !important; }
 
 #toast { position: fixed; right: 20px; bottom: 20px; z-index: 20; max-width: min(390px, calc(100vw - 40px)); padding: 10px 13px; border: 3px solid; border-color: #fff #444 #444 #fff; background: #ffffb2; color: #000; box-shadow: 4px 4px #004747; opacity: 0; transform: translateY(8px); transition: opacity .15s, transform .15s; pointer-events: none; font: bold .75rem/1.4 'Courier New', monospace; }
@@ -85,6 +103,7 @@ button:disabled, input:disabled { cursor: not-allowed !important; opacity: .5 !i
   main { width: calc(100% - 20px); margin-top: 14px; }
   .topbar { padding: 8px 12px; }.topbar small { display: none; }
   .hero { padding: 18px; }.hero::after { display: none; }
+  .competition-panel { align-items: stretch; flex-direction: column; }.competition-panel button { width: 100%; }
   .sensor-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .controls { grid-template-columns: 1fr; }
   .orientation { grid-template-columns: 1fr; text-align: center; }.orientation > div:last-child { padding-bottom: 10px; }

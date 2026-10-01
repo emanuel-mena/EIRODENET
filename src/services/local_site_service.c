@@ -9,6 +9,7 @@
 #include "app_storage.h"
 #include "cJSON.h"
 #include "competition_service.h"
+#include "diagnostics_service.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
@@ -90,6 +91,17 @@ static const char *navigation_phase_name(navigation_phase_t phase)
     }
 }
 
+static bool vision_frame_recent(uint32_t *age_ms)
+{
+    vision_status_t vision = {0};
+    vision_service_get_status(&vision);
+    const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    const uint64_t age = vision.last_valid_frame_ms != 0 && now_ms >= vision.last_valid_frame_ms
+        ? now_ms - vision.last_valid_frame_ms : UINT32_MAX;
+    if (age_ms != NULL) *age_ms = age > UINT32_MAX ? UINT32_MAX : (uint32_t)age;
+    return vision.connected && vision.protocol_valid && age <= 750;
+}
+
 static esp_err_t state_handler(httpd_req_t *request)
 {
     rover_imu_state_t imu = {0};
@@ -112,6 +124,11 @@ static esp_err_t state_handler(httpd_req_t *request)
     cJSON_AddStringToObject(root, "hostname", s_hostname);
     cJSON_AddStringToObject(root, "mode", app_mode_name(app_mode_get()));
     cJSON_AddStringToObject(root, "competition", competition_service_status());
+    uint32_t frame_age = UINT32_MAX;
+    const bool frame_recent = vision_frame_recent(&frame_age);
+    cJSON *vision_stream = cJSON_AddObjectToObject(root, "vision_stream");
+    cJSON_AddBoolToObject(vision_stream, "recent", frame_recent);
+    cJSON_AddNumberToObject(vision_stream, "age_ms", frame_age);
     competition_status_t competition = {0};
     competition_service_get_status(&competition);
     cJSON *competition_check = cJSON_AddObjectToObject(root, "competition_check");
@@ -251,6 +268,11 @@ static esp_err_t peer_state_handler(httpd_req_t *request)
     cJSON_AddStringToObject(root, "hostname", "");
     cJSON_AddStringToObject(root, "mode", app_mode_name((app_mode_t)peer.mode));
     cJSON_AddStringToObject(root, "competition", "stub");
+    cJSON *vision_stream = cJSON_AddObjectToObject(root, "vision_stream");
+    cJSON_AddBoolToObject(vision_stream, "recent",
+        peer.vision_recent && (uint64_t)peer.vision_frame_age_ms + peer.age_ms <= 750);
+    cJSON_AddNumberToObject(vision_stream, "age_ms",
+        (double)peer.vision_frame_age_ms + peer.age_ms);
     cJSON *imu = cJSON_AddObjectToObject(root, "imu");
     cJSON_AddBoolToObject(imu, "valid", peer.imu_valid);
     cJSON_AddBoolToObject(imu, "calibrated", peer.imu_calibrated);
@@ -342,6 +364,91 @@ static cJSON *receive_json(httpd_req_t *request)
     }
     body[received] = '\0';
     return cJSON_ParseWithLength(body, received);
+}
+
+static esp_err_t competition_rejection(httpd_req_t *request, const char *code,
+                                       uint8_t rover_id, const char *status)
+{
+    httpd_resp_set_status(request, status);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", false);
+    cJSON_AddStringToObject(root, "code", code);
+    cJSON_AddNumberToObject(root, "rover_id", rover_id);
+    return send_json(request, root);
+}
+
+static esp_err_t competition_enter_handler(httpd_req_t *request)
+{
+    app_storage_config_t config = {0};
+    app_storage_get_config(&config);
+    const uint8_t own_id = config.who_am_i;
+    peer_comms_status_t peer = {0};
+    peer_comms_service_get_status(&peer);
+    if (app_mode_get() != APP_MODE_TEST)
+        return competition_rejection(request, "test_mode_required", own_id, "409 Conflict");
+    if (!peer.connected || (peer.rover_id != APP_STORAGE_ROVER_10 &&
+                            peer.rover_id != APP_STORAGE_ROVER_11) || peer.rover_id == own_id)
+        return competition_rejection(request, "peer_offline", peer.rover_id, "503 Service Unavailable");
+    if (peer.mode != APP_MODE_TEST)
+        return competition_rejection(request, "test_mode_required", peer.rover_id, "409 Conflict");
+    if (!vision_frame_recent(NULL))
+        return competition_rejection(request, "server_data_stale", own_id, "409 Conflict");
+    if (!peer.vision_recent || (uint64_t)peer.vision_frame_age_ms + peer.age_ms > 750)
+        return competition_rejection(request, "server_data_stale", peer.rover_id, "409 Conflict");
+    uint8_t reason = 0;
+    const esp_err_t err = peer_comms_service_request_competition(&reason);
+    if (err != ESP_OK) {
+        peer_comms_service_get_status(&peer);
+        const char *code = peer.mode == APP_MODE_COMPETITION ? "mixed_mode" :
+            reason == 2 ? "server_data_stale" :
+            reason == 1 ? "test_mode_required" : "peer_confirmation_failed";
+        return competition_rejection(request, code, peer.rover_id,
+            err == ESP_ERR_TIMEOUT ? "504 Gateway Timeout" : "409 Conflict");
+    }
+    if (app_mode_enter_competition() != ESP_OK)
+        return competition_rejection(request, "mixed_mode", own_id, "409 Conflict");
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "mode", "competition");
+    return send_json(request, root);
+}
+
+static esp_err_t diagnostics_handler(httpd_req_t *request, bool peer_logs)
+{
+    app_storage_config_t config = {0};
+    app_storage_get_config(&config);
+    peer_comms_status_t peer = {0};
+    if (peer_logs) peer_comms_service_get_status(&peer);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "rover_id", peer_logs ? peer.rover_id : config.who_am_i);
+    cJSON_AddNumberToObject(root, "boot_id", peer_logs ? peer.boot_id : diagnostics_boot_id());
+    cJSON_AddNumberToObject(root, "reset_reason",
+                            peer_logs ? peer.reset_reason : diagnostics_reset_reason());
+    cJSON *entries = cJSON_AddArrayToObject(root, "entries");
+    const size_t count = diagnostics_count(peer_logs);
+    for (size_t index = 0; index < count; ++index) {
+        diagnostic_entry_t entry;
+        if (!diagnostics_get(peer_logs, index, &entry)) continue;
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddNumberToObject(item, "boot_id", entry.boot_id);
+        cJSON_AddNumberToObject(item, "sequence", entry.sequence);
+        cJSON_AddNumberToObject(item, "uptime_ms", entry.uptime_ms);
+        cJSON_AddNumberToObject(item, "reset_reason", entry.reset_reason);
+        cJSON_AddStringToObject(item, "text", entry.text);
+        cJSON_AddItemToArray(entries, item);
+    }
+    return send_json(request, root);
+}
+
+static esp_err_t local_diagnostics_handler(httpd_req_t *request)
+{
+    return diagnostics_handler(request, false);
+}
+
+static esp_err_t peer_diagnostics_handler(httpd_req_t *request)
+{
+    return diagnostics_handler(request, true);
 }
 
 static esp_err_t drive_handler(httpd_req_t *request)
@@ -569,7 +676,7 @@ esp_err_t local_site_service_set_hostname(const char *hostname)
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 9;
+    config.max_uri_handlers = 12;
     err = httpd_start(&s_server, &config);
     if (err == ESP_OK) {
         const httpd_uri_t state_route = {
@@ -588,6 +695,15 @@ esp_err_t local_site_service_set_hostname(const char *hostname)
         const httpd_uri_t peer_target_route = {
             .uri = "/api/v1/peer/navigation/target", .method = HTTP_POST,
             .handler = peer_target_handler};
+        const httpd_uri_t competition_route = {
+            .uri = "/api/v1/competition/enter", .method = HTTP_POST,
+            .handler = competition_enter_handler};
+        const httpd_uri_t diagnostics_route = {
+            .uri = "/api/v1/diagnostics", .method = HTTP_GET,
+            .handler = local_diagnostics_handler};
+        const httpd_uri_t peer_diagnostics_route = {
+            .uri = "/api/v1/peer/diagnostics", .method = HTTP_GET,
+            .handler = peer_diagnostics_handler};
         const httpd_uri_t options_route = {
             .uri = "/api/*", .method = HTTP_OPTIONS, .handler = options_handler};
         const httpd_uri_t static_route = {
@@ -599,6 +715,9 @@ esp_err_t local_site_service_set_hostname(const char *hostname)
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &peer_state_route);
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &peer_drive_route);
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &peer_target_route);
+        if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &competition_route);
+        if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &diagnostics_route);
+        if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &peer_diagnostics_route);
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &options_route);
         if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &static_route);
     }

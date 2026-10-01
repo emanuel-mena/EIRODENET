@@ -2,6 +2,7 @@
 #include "app_mode.h"
 #include "app_storage.h"
 #include "competition_service.h"
+#include "diagnostics_service.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "manual_control_service.h"
@@ -41,6 +42,7 @@ void app_main(void)
 
     uint32_t boot_count = 0;
     err = app_storage_init(&boot_count);
+    diagnostics_service_start(boot_count);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Storage no disponible: %s", esp_err_to_name(err));
     } else {
