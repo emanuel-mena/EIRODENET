@@ -5,7 +5,7 @@ No puedes agregar reglas nuevas a AGENTS.md sin que el usuario lo pida o autoric
 Para componentes de ESP Component Registry: añade `fabricante/componente` con versión fija en `src/idf_component.yml`, declara `componente` en `PRIV_REQUIRES` de `src/CMakeLists.txt` (`REQUIRES` sólo si lo exponen headers públicos), conserva `dependencies.lock`, ignora `managed_components/`, no uses `lib_deps` y valida con `pio run` (`pio run -t clean` antes si la resolución quedó obsoleta).
 
 # Mapa de pines
-La fuente única del cableado es `include/board_pins.h`; consulta `README.md` para la tabla y las restricciones eléctricas.
+La fuente única del cableado es `include/board_pins.hpp`; consulta `README.md` para la tabla y las restricciones eléctricas.
 
 # Modelos TinyML
 Conserva la partición `model` como `data/0x40`, con offset `0x600000` y tamaño máximo de 2 MiB según `partitions.csv`. La aplicación debe localizarla mediante `esp_partition_find_first()` usando el nombre y subtipo, sin depender del offset fijo.

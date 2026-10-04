@@ -6,7 +6,7 @@ La aplicación integra movimiento diferencial, percepción local, conectividad W
 preferencias persistentes y un sitio web estático servido desde la propia placa.
 
 El proyecto utiliza PlatformIO sobre una CRCibernética IdeaBoard con ESP32-WROOM-32E
-y flash de 8 MB. Su punto de entrada es `src/main.c`; el hardware se consume mediante
+y flash de 8 MB. Su punto de entrada es `src/main.cpp`; el hardware se consume mediante
 adapters pequeños para que la lógica de navegación no dependa directamente de los
 drivers de ESP-IDF.
 
@@ -23,7 +23,7 @@ color. Se debe revisar su alimentación y el divisor resistivo conectado a GPIO3
 
 ## Mapa de conexiones
 
-`include/board_pins.h` es la fuente única de verdad del cableado. Cualquier cambio
+`include/board_pins.hpp` es la fuente única de verdad del cableado. Cualquier cambio
 físico debe reflejarse allí, sin introducir números GPIO en la lógica de aplicación.
 
 | Componente | Señal | GPIO |
@@ -53,22 +53,22 @@ resistencias pull-up/pull-down internas.
 
 | Módulo | API pública | Responsabilidad |
 |---|---|---|
-| Storage | `app_storage.h` | Inicialización NVS, preferencias y credenciales Wi-Fi |
-| Internet | `internet_adapter.h` | Estación Wi-Fi, reintentos, estado, RSSI e IPv4 |
-| Ultrasónico | `ultrasonic_adapter.h` | Disparo del HY-SRF05 y distancia en milímetros |
-| Infrarrojos | `infrared_adapter.h` | Lectura ADC de 12 bits conjunta de SEN1 a SEN4 |
-| Color | `color_sensor_adapter.h` | Iluminación RGB y cuatro muestras ADC reflectivas |
-| IMU adapter | `imu_adapter.h` | Interfaz singleton configurada desde el mapa de pines |
-| Driver IMU | `lsm6ds3tr_c.h` | Registros I2C, identificación y conversión física |
-| Motores | `motor_adapter.h` | PWM independiente, sentido y parada segura |
-| Sitio local | `local_site_service.h` | Montaje SPIFFS, HTTP y anuncio mDNS |
-| Servicios | `rover_service.h` | Muestreo concurrente, calibración y fusión de orientación |
-| Serial | `serial_protocol.h` | Configuración y telemetría NDJSON sobre UART0 |
-| Modos | `app_mode.h` | Cambio con BOOT e indicador NeoPixel de prueba/competencia |
-| Navegación | `navigation_service.h` | Fusión visión/IMU/cuadrícula y control punto a punto en núcleo 1 |
-| Control manual | `manual_control_service.h` | Comandos web con parada de seguridad a 500 ms |
-| Competencia | `competition_service.h` | Verificación de red, identidad y función antes de la estrategia autónoma |
-| Comunicación par | `peer_comms_service.h` | Telemetría y comandos entre rovers mediante ESP-NOW |
+| Storage | `app_storage.hpp` | Inicialización NVS, preferencias y credenciales Wi-Fi |
+| Internet | `internet_adapter.hpp` | Estación Wi-Fi, reintentos, estado, RSSI e IPv4 |
+| Ultrasónico | `ultrasonic_adapter.hpp` | Disparo del HY-SRF05 y distancia en milímetros |
+| Infrarrojos | `infrared_adapter.hpp` | Lectura ADC de 12 bits conjunta de SEN1 a SEN4 |
+| Color | `color_sensor_adapter.hpp` | Iluminación RGB y cuatro muestras ADC reflectivas |
+| IMU adapter | `imu_adapter.hpp` | Interfaz singleton configurada desde el mapa de pines |
+| Driver IMU | `lsm6ds3tr_c.hpp` | Registros I2C, identificación y conversión física |
+| Motores | `motor_adapter.hpp` | PWM independiente, sentido y parada segura |
+| Sitio local | `local_site_service.hpp` | Montaje SPIFFS, HTTP y anuncio mDNS |
+| Servicios | `rover_service.hpp` | Muestreo concurrente, calibración y fusión de orientación |
+| Serial | `serial_protocol.hpp` | Configuración y telemetría NDJSON sobre UART0 |
+| Modos | `app_mode.hpp` | Cambio con BOOT e indicador NeoPixel de prueba/competencia |
+| Navegación | `navigation_service.hpp` | Fusión visión/IMU/cuadrícula y control punto a punto en núcleo 1 |
+| Control manual | `manual_control_service.hpp` | Comandos web con parada de seguridad a 500 ms |
+| Competencia | `competition_service.hpp` | Verificación de red, identidad y función antes de la estrategia autónoma |
+| Comunicación par | `peer_comms_service.hpp` | Telemetría y comandos entre rovers mediante ESP-NOW |
 
 Todas las APIs públicas incluyen documentación JavaDoc/Doxygen con parámetros,
 valores de retorno, unidades y precondiciones.

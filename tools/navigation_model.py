@@ -1,7 +1,7 @@
 """Modelo puro de la geometría y el controlador del prototipo de navegación.
 
 Se usa para pruebas deterministas en el host; las mismas convenciones y umbrales
-están documentados junto al firmware en ``navigation_service.c``.
+están documentados junto al firmware en ``navigation_service.cpp``.
 """
 
 from __future__ import annotations
