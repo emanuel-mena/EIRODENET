@@ -233,20 +233,21 @@ def occupied_cells(
     obstacles: list[tuple[int, int]],
     peer: tuple[int, int] | None,
 ) -> set[tuple[int, int]]:
-    """Replica los márgenes conservadores usados por el firmware."""
-    result = {
-        (col, row)
-        for row in range(rows)
-        for col in range(cols)
-        if col < 2 or row < 2 or col >= cols - 2 or row >= rows - 2
-    }
-    entities = [(item, 5) for item in obstacles]
+    """Replica la ocupación circular del firmware, sin bloquear el borde."""
+    rover_radius = math.hypot(5 / 2, 7.5 / 2)
+    clearance = 0.4
+    result: set[tuple[int, int]] = set()
+    entities = [(item, rover_radius + 5 * math.sqrt(2) / 2 + clearance)
+                for item in obstacles]
     if peer is not None:
-        entities.append((peer, 4))
+        entities.append((peer, 2 * rover_radius + clearance))
     for center, radius in entities:
-        for row in range(max(0, center[1] - radius), min(rows, center[1] + radius + 1)):
-            for col in range(max(0, center[0] - radius), min(cols, center[0] + radius + 1)):
-                result.add((col, row))
+        for row in range(max(0, math.floor(center[1] - radius)),
+                         min(rows, math.ceil(center[1] + radius) + 1)):
+            for col in range(max(0, math.floor(center[0] - radius)),
+                             min(cols, math.ceil(center[0] + radius) + 1)):
+                if math.hypot(col + 0.5 - center[0], row + 0.5 - center[1]) <= radius:
+                    result.add((col, row))
     return result
 
 

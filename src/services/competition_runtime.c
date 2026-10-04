@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "grid_planner.h"
+#include "navigation_geometry.h"
 #include "motor_adapter.h"
 #include "motion_control.h"
 #include "navigation_service.h"
@@ -15,9 +16,7 @@
 #include "vision_service.h"
 
 #define FRESH_MS 750U
-#define ROVER_RADIUS 5.60f
 #define CUBE_RADIUS_FACTOR 0.707107f
-#define CLEARANCE 0.40f
 #define STAGE_DISTANCE 6.50f
 #define PRESTAGE_DISTANCE 9.50f
 #define DOCK_MM 30U
@@ -111,8 +110,8 @@ static bool plan(const vision_status_t *v, uint8_t color, bool peer_start,
     const float stage_row = cy - STAGE_DISTANCE * dy / distance;
     const float pre_col = cx - PRESTAGE_DISTANCE * dx / distance;
     const float pre_row = cy - PRESTAGE_DISTANCE * dy / distance;
-    const bool has_prestage = pre_col >= 2 && pre_row >= 2 &&
-                              pre_col < v->grid_cols - 2 && pre_row < v->grid_rows - 2;
+    const bool has_prestage = pre_col >= 0 && pre_row >= 0 &&
+                              pre_col < v->grid_cols && pre_row < v->grid_rows;
     const float start_col = peer_start ? v->peer_col : v->col;
     const float start_row = peer_start ? v->peer_row : v->row;
     if (!has_prestage || stage_col < 0 || stage_row < 0 || stage_col >= v->grid_cols ||
@@ -120,22 +119,18 @@ static bool plan(const vision_status_t *v, uint8_t color, bool peer_start,
         return false;
     const uint8_t cols = v->grid_cols, rows = v->grid_rows;
     memset(s_occupied, 0, (size_t)cols * rows);
-    for (uint8_t r = 0; r < rows; ++r)
-        for (uint8_t c = 0; c < cols; ++c)
-            if (c < 2 || r < 2 || c >= cols - 2 || r >= rows - 2)
-                s_occupied[r * cols + c] = 1;
     for (uint8_t i = 0; i < v->obstacle_count; ++i)
         if (v->obstacles[i].age_ms <= FRESH_MS)
             mark_circle(cols, rows, v->obstacles[i].col, v->obstacles[i].row,
-                        ROVER_RADIUS + 5.0f + CLEARANCE);
+                        navigation_square_clearance(NAV_OBSTACLE_SIDE_CELLS));
     for (uint8_t i = 0; i < VISION_MAX_CUBES; ++i)
         if (v->cube_valid[i] && v->cubes[i].age_ms <= FRESH_MS)
             mark_circle(cols, rows, v->cubes[i].col, v->cubes[i].row,
-                        ROVER_RADIUS + v->cube_side * CUBE_RADIUS_FACTOR + CLEARANCE);
+                        navigation_square_clearance(v->cube_side));
     if (length(v->col - v->peer_col, v->row - v->peer_row) >
-        2 * ROVER_RADIUS + CLEARANCE)
+        navigation_peer_clearance())
         mark_circle(cols, rows, peer_start ? v->col : v->peer_col,
-                    peer_start ? v->row : v->peer_row, 2 * ROVER_RADIUS + CLEARANCE);
+                    peer_start ? v->row : v->peer_row, navigation_peer_clearance());
     const grid_planner_cell_t start = {
         .col = (uint8_t)start_col,
         .row = (uint8_t)start_row,
@@ -329,17 +324,17 @@ static bool next_step_clear(const vision_status_t *v, uint8_t carried_color,
     const float radians = v->theta_deg * 0.01745329252f;
     const float x = v->col + step * cosf(radians);
     const float y = v->row - step * sinf(radians);
-    if (x < 2 || y < 2 || x > v->grid_cols - 2 || y > v->grid_rows - 2)
+    if (x < 0 || y < 0 || x >= v->grid_cols || y >= v->grid_rows)
         return false;
     for (uint8_t i = 0; i < v->obstacle_count; ++i)
         if (v->obstacles[i].age_ms <= FRESH_MS &&
             length(x - v->obstacles[i].col, y - v->obstacles[i].row) <
-                ROVER_RADIUS + 5.0f + CLEARANCE)
+                navigation_square_clearance(NAV_OBSTACLE_SIDE_CELLS))
             return false;
     for (uint8_t i = 0; i < VISION_MAX_CUBES; ++i)
         if (i != carried_color && v->cube_valid[i] &&
             length(x - v->cubes[i].col, y - v->cubes[i].row) <
-                ROVER_RADIUS + v->cube_side * CUBE_RADIUS_FACTOR + CLEARANCE)
+                navigation_square_clearance(v->cube_side))
             return false;
     return true;
 }

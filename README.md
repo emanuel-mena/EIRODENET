@@ -281,7 +281,7 @@ npm run dev
 La página sólo se conecta por HTTP al rover que la sirve, sin asumir nombres como
 `rover-10.local` o `rover-11.local`. Ese rover expone su propio estado y actúa como
 puente hacia el compañero mediante ESP-NOW y la MAC guardada en `peer_mac`. Ambos
-rovers publican un paquete binario de estado ESP-NOW v7 cada 200 ms, incluida la
+rovers publican un paquete binario de estado ESP-NOW v8 cada 200 ms, incluida la
 ruta discreta; tras 1500 ms sin paquetes,
 el panel del compañero se marca desconectado y bloquea telemetría y comandos. Por
 eso se puede abrir, por ejemplo, `http://cecilio.local` y operar ambos paneles sin
@@ -291,7 +291,7 @@ El botón «Entrar en competencia» se habilita cuando ambos rovers están en mo
 prueba, el enlace ESP-NOW está activo y cada rover recibió una trama válida del
 servidor de visión durante los últimos 750 ms. `POST /api/v1/competition/enter`
 repite la validación en el anfitrión, solicita el cambio al compañero por ESP-NOW
-v7 y espera su confirmación antes de cambiar el modo local. Una orden rechazada
+v8 y espera su confirmación antes de cambiar el modo local. Una orden rechazada
 indica el rover y la condición fallida. Si sólo uno cambió, la web indica el estado
 mixto para corregirlo con BOOT. BOOT sigue permitiendo cambiar de modo; la web sólo
 permite entrar. Cada cambio detiene motores y cancela navegación.
@@ -318,7 +318,7 @@ si fuera un error del sistema de visión.
 
 Antes de pulsar BOOT o usar el botón web, configure en cada rover su identidad (10 u 11), la MAC del
 compañero, Wi-Fi y la dirección del servidor de visión v2. Ambos deben usar el
-mismo firmware ESP-NOW v7. El servidor debe ver la cancha y los marcadores y
+mismo firmware ESP-NOW v8. El servidor debe ver la cancha y los marcadores y
 llegar a `READY` con tiempo para completar la verificación y las cinco capturas.
 La IMU debe estar calibrada y los infrarrojos operativos para que después se
 acepten objetivos de navegación. Al entrar en competencia el firmware detiene los
@@ -356,7 +356,7 @@ Los destellos rojos siguen reservados para fallos de verificación.
 |---:|---|---|
 | 1 | Wi-Fi | El rover no obtuvo conexión con dirección IPv4 en 15 segundos. Revise las credenciales, el punto de acceso y la asignación de IP. |
 | 2 | Datos del servidor | No llegó una trama válida del servidor TCP en 5 segundos. Revise `server_ipv4`, `server_port`, la conexión de red y el contrato v2. No se requiere que el servidor responda a ping. |
-| 3 | Enlace ESP-NOW | No llegó la respuesta del compañero en 5 segundos. Revise su alimentación, la MAC `peer_mac`, el canal Wi-Fi y que ambos tengan el protocolo ESP-NOW v7. |
+| 3 | Enlace ESP-NOW | No llegó la respuesta del compañero en 5 segundos. Revise su alimentación, la MAC `peer_mac`, el canal Wi-Fi y que ambos tengan el protocolo ESP-NOW v8. |
 | 4 | `WHO_AM_I` | No llegó la identidad en 5 segundos, es inválida o coincide con la propia. Configure uno como Rover 10 y el otro como Rover 11. |
 | 5 | Comparación de MAC | No se pudo leer la MAC STA propia, falta la MAC del compañero o ambas son iguales. Revise `peer_mac` en la configuración. |
 
@@ -381,6 +381,11 @@ retransmisiones con el mismo `ts_ms` no se vuelven a fusionar como si
 fueran capturas nuevas y la pose caduca después de 750 ms sin una captura nueva.
 Patrones ambiguos no corrigen la pose. El planificador evita obstáculos visuales y al
 otro rover, mantiene rumbos múltiplos de 45 grados y no corta esquinas bloqueadas. Si
+el servidor publica obstáculos, se modelan como bloques de 5 celdas de lado; los cubos
+usan `cube_side` (3 celdas en esta edición) y cada rover mide 5 por 7.5 celdas. Las
+zonas ocupadas incluyen el cuerpo del rover y 0.4 celdas de holgura, sin bloquear
+una franja adicional junto al borde. Las órdenes al compañero reciben confirmación
+de aceptación por ESP-NOW; la web muestra la causa de espera, bloqueo o error. Si
 cae la visión continúa como máximo dos cruces confirmados con la cuadrícula calibrada;
 después se detiene y replantea al recuperar una captura. La celda visual usa 0.12
 celdas de histéresis en cada frontera y la ruta conserva el desplazamiento fraccional

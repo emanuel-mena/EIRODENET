@@ -21,7 +21,7 @@
 #include "vision_service.h"
 
 #define PEER_MAGIC 0x524f4952U
-#define PEER_PROTOCOL_VERSION 7U
+#define PEER_PROTOCOL_VERSION 8U
 #define PEER_STATE_PERIOD_MS 200U
 #define PEER_TIMEOUT_MS 1500U
 
@@ -39,6 +39,7 @@ typedef enum {
     PEER_MESSAGE_COMPETITION_ACK = 11,
     PEER_MESSAGE_LOG = 12,
     PEER_MESSAGE_LOG_ACK = 13,
+    PEER_MESSAGE_TARGET_ACK = 14,
 } peer_message_type_t;
 
 typedef struct {
@@ -60,6 +61,14 @@ typedef struct {
     uint8_t navigation_heading_index;
     uint8_t navigation_blind_crossings;
     uint8_t navigation_wait_reason;
+    uint8_t navigation_cancel_reason;
+    uint8_t navigation_grid_calibrated;
+    uint8_t navigation_grid_pattern;
+    uint8_t navigation_grid_calibrated_mask;
+    int16_t navigation_motor_left;
+    int16_t navigation_motor_right;
+    int32_t navigation_error;
+    uint8_t navigation_failure_reason;
     float navigation_heading_deg;
     float vision_heading_offset_deg;
     float navigation_waypoint_col;
@@ -86,7 +95,8 @@ typedef struct {
     union {
         peer_state_payload_t state;
         struct { int16_t left; int16_t right; } drive;
-        struct { float col; float row; } target;
+        struct { float col; float row; uint32_t nonce; } target;
+        struct { uint32_t nonce, request_id; int32_t error; } target_ack;
         struct { uint32_t nonce; uint8_t identity; } verification;
         struct {
             uint32_t id;
@@ -121,6 +131,9 @@ static uint8_t s_mission_fragments;
 static uint8_t s_mission_next_fragment;
 static bool s_mission_complete;
 static uint32_t s_last_mode_nonce;
+static uint32_t s_last_target_nonce;
+static uint32_t s_last_target_request_id;
+static esp_err_t s_last_target_error;
 static uint32_t s_forwarded_log_sequence;
 static uint32_t s_pending_log_sequence;
 static uint32_t s_pending_log_boot_id;
@@ -222,6 +235,14 @@ static void send_local_state(void)
     state->navigation_blind_crossings = navigation.crossings_without_vision;
     state->navigation_replans = navigation.replan_count;
     state->navigation_wait_reason = (uint8_t)navigation.wait_reason;
+    state->navigation_cancel_reason = (uint8_t)navigation.cancel_reason;
+    state->navigation_grid_calibrated = navigation.grid_calibrated;
+    state->navigation_grid_pattern = navigation.infrared_pattern;
+    state->navigation_grid_calibrated_mask = navigation.infrared_calibrated_mask;
+    state->navigation_motor_left = navigation.motor_left;
+    state->navigation_motor_right = navigation.motor_right;
+    state->navigation_error = navigation.error;
+    state->navigation_failure_reason = (uint8_t)navigation.failure_reason;
     state->drive_left = drive.left;
     state->drive_right = drive.right;
     state->competition_delivered_mask = competition_runtime_delivered_mask();
@@ -279,6 +300,14 @@ static void accept_state(const peer_packet_t *packet)
     s_status.navigation_blind_crossings = state->navigation_blind_crossings;
     s_status.navigation_replans = state->navigation_replans;
     s_status.navigation_wait_reason = state->navigation_wait_reason;
+    s_status.navigation_cancel_reason = state->navigation_cancel_reason;
+    s_status.navigation_grid_calibrated = state->navigation_grid_calibrated != 0;
+    s_status.navigation_grid_pattern = state->navigation_grid_pattern;
+    s_status.navigation_grid_calibrated_mask = state->navigation_grid_calibrated_mask;
+    s_status.navigation_motor_left = state->navigation_motor_left;
+    s_status.navigation_motor_right = state->navigation_motor_right;
+    s_status.navigation_error = state->navigation_error;
+    s_status.navigation_failure_reason = state->navigation_failure_reason;
     s_status.drive_left = state->drive_left;
     s_status.drive_right = state->drive_right;
     s_status.competition_delivered_mask = state->competition_delivered_mask;
@@ -347,6 +376,14 @@ static void handle_received(const received_packet_t *received)
         s_status.mode_ack_nonce = received->packet.payload.mode.nonce;
         s_status.mode_ack_accepted = received->packet.payload.mode.accepted != 0;
         s_status.mode_ack_reason = received->packet.payload.mode.reason;
+        xSemaphoreGive(s_lock);
+        return;
+    }
+    if (received->packet.type == PEER_MESSAGE_TARGET_ACK) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_status.target_ack_nonce = received->packet.payload.target_ack.nonce;
+        s_status.target_ack_request_id = received->packet.payload.target_ack.request_id;
+        s_status.target_ack_error = received->packet.payload.target_ack.error;
         xSemaphoreGive(s_lock);
         return;
     }
@@ -444,9 +481,22 @@ static void handle_received(const received_packet_t *received)
                                        received->packet.payload.drive.right);
             break;
         case PEER_MESSAGE_TARGET:
-            navigation_service_submit(received->packet.payload.target.col,
-                                      received->packet.payload.target.row, NULL);
+        {
+            const uint32_t nonce = received->packet.payload.target.nonce;
+            if (nonce != s_last_target_nonce || nonce == 0) {
+                s_last_target_nonce = nonce;
+                s_last_target_error = navigation_service_submit(
+                    received->packet.payload.target.col,
+                    received->packet.payload.target.row, &s_last_target_request_id);
+                if (s_last_target_error != ESP_OK) s_last_target_request_id = 0;
+            }
+            peer_packet_t reply = {.type = PEER_MESSAGE_TARGET_ACK};
+            reply.payload.target_ack.nonce = nonce;
+            reply.payload.target_ack.request_id = s_last_target_request_id;
+            reply.payload.target_ack.error = s_last_target_error;
+            send_packet(&reply);
             break;
+        }
         default:
             break;
     }
@@ -571,7 +621,7 @@ esp_err_t peer_comms_service_send_drive(int16_t left, int16_t right)
     return send_packet(&packet);
 }
 
-esp_err_t peer_comms_service_send_target(float col, float row)
+esp_err_t peer_comms_service_send_target(float col, float row, uint32_t *request_id)
 {
     peer_comms_status_t status;
     peer_comms_service_get_status(&status);
@@ -581,7 +631,23 @@ esp_err_t peer_comms_service_send_target(float col, float row)
     peer_packet_t packet = {.type = PEER_MESSAGE_TARGET};
     packet.payload.target.col = col;
     packet.payload.target.row = row;
-    return send_packet(&packet);
+    packet.payload.target.nonce = (uint32_t)esp_timer_get_time() | 1U;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_status.target_ack_nonce = 0;
+    xSemaphoreGive(s_lock);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const esp_err_t sent = send_packet(&packet);
+        if (sent != ESP_OK) return sent;
+        for (int wait = 0; wait < 10; ++wait) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            peer_comms_service_get_status(&status);
+            if (status.target_ack_nonce == packet.payload.target.nonce) {
+                if (request_id != NULL) *request_id = status.target_ack_request_id;
+                return status.target_ack_error;
+            }
+        }
+    }
+    return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t peer_comms_service_request_competition(uint8_t *reason)

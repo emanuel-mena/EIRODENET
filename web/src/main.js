@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import './style.css'
-import { competitionEligibility, mergeDiagnostics } from './console_state.js'
+import { competitionEligibility, formatPoseSpeed, mergeDiagnostics,
+  navigationMessage, targetRejectionMessage } from './console_state.js'
 
 const roverIds = [10, 11]
 
@@ -40,7 +41,7 @@ function roverCard(id) {
       <section class="controls"><div><p class="section-label">CONTROL DIRECTO</p><div class="dpad">
         <button data-drive="forward" aria-label="Avanzar">↑</button><button data-drive="left" aria-label="Girar izquierda">←</button><button data-drive="stop" class="stop" aria-label="Detener">■</button><button data-drive="right" aria-label="Girar derecha">→</button><button data-drive="back" aria-label="Retroceder">↓</button>
       </div><small class="hint">Mantén presionado · parada automática en 500 ms</small></div>
-      <form class="target-form"><p class="section-label">OBJETIVO DE NAVEGACIÓN</p><div><label>Col <input name="col" type="number" min="0" step="0.1" required></label><label>Fila <input name="row" type="number" min="0" step="0.1" required></label></div><button type="submit">Navegar al punto</button><button type="button" class="cancel-navigation">Cancelar y detener</button><small class="nav-state">Esperando pose de visión</small><div class="nav-telemetry"><span data-nav="pose">Pose —</span><span data-nav="speed">Velocidad —</span><span data-nav="vision">Visión —</span><span data-nav="grid">Cuadrícula —</span><span data-nav="route">Ruta —</span><span data-nav="waypoint">Waypoint —</span></div></form></section>
+      <form class="target-form"><p class="section-label">OBJETIVO DE NAVEGACIÓN</p><div><label>Col <input name="col" type="number" min="0" step="0.1" required></label><label>Fila <input name="row" type="number" min="0" step="0.1" required></label></div><button type="submit">Navegar al punto</button><button type="button" class="cancel-navigation">Cancelar y detener</button><small class="nav-state" role="status" aria-live="polite">Esperando pose de visión</small><div class="nav-telemetry"><span data-nav="pose">Pose —</span><span data-nav="speed">Velocidad —</span><span data-nav="vision">Visión —</span><span data-nav="grid">Cuadrícula —</span><span data-nav="route">Ruta —</span><span data-nav="waypoint">Waypoint —</span></div></form></section>
     </fieldset>
     <section class="diagnostics" aria-label="Diagnóstico del Rover ${id}">
       <div class="diagnostics-head"><div><p class="section-label">REGISTRO LOCAL · ROVER ${id}</p><small class="diagnostics-reset">Sin datos de arranque</small></div><small class="diagnostics-count">0 / 100 líneas</small></div>
@@ -55,7 +56,8 @@ for (const id of roverIds) {
   const element = document.querySelector(`#rover-${id}`)
   const state = { id, element, base: null, online: false, busy: false, diagBusy: false,
     mode: null, visionRecent: false, visionExpiresAt: 0, driveTimer: null, logEntries: readStoredLogs(id),
-    bootId: null, resetReason: null }
+    bootId: null, resetReason: null, renderError: null, lastData: null,
+    trackedRequestId: null, notifiedNavPhase: null }
   state.orientation = makeOrientation(element.querySelector('.arrow'), id)
   rovers.set(id, state)
   element.querySelector('.target-form').addEventListener('submit', event => sendTarget(event, state))
@@ -155,14 +157,29 @@ async function poll(rover) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const data = await response.json()
     if (!data.ok || data.rover_id !== rover.id) throw new Error(`La dirección responde como Rover ${data.rover_id || 'sin ID'}`)
-    setOnline(rover, true); updateRover(rover, data)
+    renderRover(rover, data)
   } catch (error) {
     if (rover.online) notify(`Rover ${rover.id} desconectado: ${error.message}`)
     setOnline(rover, false)
   } finally { clearTimeout(timeout); rover.busy = false }
 }
 
+function renderRover(rover, data) {
+  setOnline(rover, true)
+  try {
+    updateRover(rover, data)
+    rover.renderError = null
+  } catch (error) {
+    if (rover.renderError !== error.message) {
+      console.error(`Error al mostrar telemetría de Rover ${rover.id}`, error)
+      notify(`Rover ${rover.id}: error al mostrar telemetría: ${error.message}`)
+    }
+    rover.renderError = error.message
+  }
+}
+
 function updateRover(rover, data) {
+  rover.lastData = data
   const e = rover.element; const competition = data.mode === 'competition'
   rover.mode = data.mode
   rover.visionRecent = data.vision_stream?.recent === true
@@ -185,11 +202,17 @@ function updateRover(rover, data) {
   setText(e, 'color', data.sensors.color.valid ? `${data.sensors.color.red} / ${data.sensors.color.green} / ${data.sensors.color.blue}` : `error ${data.sensors.color.error ?? '—'}`)
   e.querySelectorAll('.controls button, .controls input').forEach(control => { control.disabled = competition })
   const nav = data.navigation; const pose = nav.pose || {}; const vision = nav.vision || {}; const grid = nav.grid_encoder || {}; const route = nav.route || {}
-  e.querySelector('.nav-state').textContent = nav.has_target
-    ? `${nav.phase_name} #${nav.request_id} → (${nav.col.toFixed(1)}, ${nav.row.toFixed(1)})`
-    : `${nav.phase_name || 'idle'} · error ${nav.error || 0}`
+  const navMessage = navigationMessage(data)
+  e.querySelector('.nav-state').textContent = navMessage
+  e.querySelector('.nav-state').dataset.phase = nav.phase_name || 'idle'
+  if (nav.request_id === rover.trackedRequestId &&
+      ['blocked', 'error', 'cancelled', 'arrived', 'waiting_for_vision'].includes(nav.phase_name) &&
+      rover.notifiedNavPhase !== nav.phase_name) {
+    notify(`Rover ${rover.id}: ${navMessage}`)
+    rover.notifiedNavPhase = nav.phase_name
+  }
   e.querySelector('[data-nav="pose"]').textContent = pose.valid ? `Pose ${pose.col.toFixed(2)}, ${pose.row.toFixed(2)} · ${pose.theta_deg.toFixed(1)}°` : 'Pose no inicializada'
-  e.querySelector('[data-nav="speed"]').textContent = pose.valid ? `v ${pose.speed_cells_s.toFixed(2)} cel/s · ±${pose.uncertainty_cells.toFixed(2)} cel` : 'Velocidad —'
+  e.querySelector('[data-nav="speed"]').textContent = formatPoseSpeed(pose)
   e.querySelector('[data-nav="vision"]').textContent = vision.fresh ? `Visión fresca · ${vision.age_ms} ms` : (vision.connected ? 'Visión sin pose fresca' : 'Visión desconectada · local')
   e.querySelector('[data-nav="grid"]').textContent = grid.calibrated ? `Grid 0b${Number(grid.pattern).toString(2).padStart(4, '0')} · listo` : `Grid calibrando · máscara 0x${Number(grid.calibrated_mask || 0).toString(16)}`
   e.querySelector('[data-nav="route"]').textContent = Number.isFinite(route.cell_col)
@@ -264,9 +287,12 @@ function bindDrive(button, rover) {
 async function sendTarget(event, rover) {
   event.preventDefault(); const form = new FormData(event.currentTarget)
   const result = await post(rover, '/navigation/target', { col: Number(form.get('col')), row: Number(form.get('row')) })
-  if (result) notify(result.transport === 'esp-now'
-    ? `Rover ${rover.id}: objetivo enviado por ESP-NOW`
-    : `Rover ${rover.id}: navegación #${result.request_id} iniciada`)
+  if (result) {
+    rover.trackedRequestId = result.request_id
+    rover.notifiedNavPhase = null
+    notify(`Rover ${rover.id}: objetivo #${result.request_id} aceptado`)
+    poll(rover)
+  }
 }
 async function cancelNavigation(rover) {
   const peer = rover.base?.endsWith('/peer')
@@ -277,7 +303,9 @@ async function post(rover, path, body, announceErrors = true) {
   if (!rover.online) { if (announceErrors) notify(`Rover ${rover.id} está desconectado; comando bloqueado`); return null }
   try {
     const response = await fetch(`${rover.base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    const data = await response.json(); if (!response.ok || !data.ok) throw new Error(data.code || `HTTP ${response.status}`); return data
+    const data = await response.json()
+    if (!response.ok || !data.ok) throw new Error(targetRejectionMessage(data.code || `HTTP ${response.status}`, rover.lastData))
+    return data
   } catch (error) { if (announceErrors) notify(`Rover ${rover.id}: ${error.message}`); return null }
 }
 let toastTimer
@@ -300,7 +328,7 @@ async function discoverServingRover() {
     if (!data.ok || !rover) return
     rover.base = '/api/v1'
     rover.element.querySelector('.transport strong').textContent = `HTTP local · ${window.location.host}`
-    setOnline(rover, true); updateRover(rover, data)
+    renderRover(rover, data)
     pollDiagnostics(rover)
     const peerId = rover.id === 10 ? 11 : 10
     const peer = rovers.get(peerId)

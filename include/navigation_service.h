@@ -39,6 +39,20 @@ typedef enum {
     NAVIGATION_WAIT_PATH_OCCUPIED,
 } navigation_wait_reason_t;
 
+typedef enum {
+    NAVIGATION_FAILURE_NONE = 0,
+    NAVIGATION_FAILURE_NO_ROUTE,
+    NAVIGATION_FAILURE_ULTRASONIC_OBSTACLE,
+    NAVIGATION_FAILURE_POSE,
+    NAVIGATION_FAILURE_IMU,
+    NAVIGATION_FAILURE_IMU_CALIBRATION,
+    NAVIGATION_FAILURE_INFRARED,
+    NAVIGATION_FAILURE_UNCERTAINTY,
+    NAVIGATION_FAILURE_ULTRASONIC,
+    NAVIGATION_FAILURE_MOTOR,
+    NAVIGATION_FAILURE_ROUTE,
+} navigation_failure_reason_t;
+
 typedef struct {
     navigation_phase_t phase;
     bool has_target;
@@ -81,6 +95,7 @@ typedef struct {
     uint8_t crossings_without_vision;
     uint32_t replan_count;
     navigation_wait_reason_t wait_reason;
+    navigation_failure_reason_t failure_reason;
     int16_t motor_left;
     int16_t motor_right;
     navigation_cancel_reason_t cancel_reason;

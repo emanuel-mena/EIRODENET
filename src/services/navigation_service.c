@@ -11,6 +11,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "grid_planner.h"
+#include "navigation_geometry.h"
 #include "motor_adapter.h"
 #include "motion_control.h"
 #include "rover_service.h"
@@ -22,9 +23,6 @@
 #define SENSOR_LEFT_MM 20.0f
 #define UNCERTAINTY_LIMIT_CELLS 25.0f
 #define NAV_MAX_SEGMENTS 1024U
-#define NAV_GRID_MARGIN_CELLS 2
-#define NAV_OBSTACLE_RADIUS_CELLS 5
-#define NAV_PEER_RADIUS_CELLS 4
 #define NAV_MAX_BLIND_CROSSINGS 2U
 #define CELL_BOUNDARY_HYSTERESIS 0.12f
 #define SENSOR_INVALID_SAMPLES 3U
@@ -319,13 +317,15 @@ static bool update_estimator(const rover_imu_state_t *imu, const rover_sensor_st
     return new_vision_frame;
 }
 
-static void mark_occupied(uint8_t cols, uint8_t rows, int center_col, int center_row, int radius)
+static void mark_occupied(uint8_t cols, uint8_t rows, float center_col, float center_row,
+                          float radius)
 {
-    for (int row = center_row - radius; row <= center_row + radius; ++row) {
+    for (int row = (int)floorf(center_row - radius); row <= (int)ceilf(center_row + radius); ++row) {
         if (row < 0 || row >= rows) continue;
-        for (int col = center_col - radius; col <= center_col + radius; ++col) {
+        for (int col = (int)floorf(center_col - radius); col <= (int)ceilf(center_col + radius); ++col) {
             if (col < 0 || col >= cols) continue;
-            s_occupancy[row * cols + col] = 1;
+            if (hypotf(col + 0.5f - center_col, row + 0.5f - center_row) <= radius)
+                s_occupancy[row * cols + col] = 1;
         }
     }
 }
@@ -338,33 +338,23 @@ static esp_err_t build_occupancy(const vision_status_t *vision)
     const uint8_t cols = (uint8_t)vision->grid_cols;
     const uint8_t rows = (uint8_t)vision->grid_rows;
     memset(s_occupancy, 0, (size_t)cols * rows);
-    for (uint8_t row = 0; row < rows; ++row) {
-        for (uint8_t col = 0; col < cols; ++col) {
-            const int margin = NAV_GRID_MARGIN_CELLS;
-            if (col < margin || row < margin ||
-                col >= cols - margin || row >= rows - margin)
-                s_occupancy[row * cols + col] = 1;
-        }
-    }
     for (uint8_t i = 0; i < vision->obstacle_count; ++i) {
         const vision_position_t *obstacle = &vision->obstacles[i];
         if (obstacle->age_ms > VISION_FRESH_MS) continue;
-        mark_occupied(cols, rows, coordinate_cell(obstacle->col, cols),
-                      coordinate_cell(obstacle->row, rows),
-                      s_competition_target ? 10 : NAV_OBSTACLE_RADIUS_CELLS);
+        mark_occupied(cols, rows, obstacle->col, obstacle->row,
+                      navigation_square_clearance(NAV_OBSTACLE_SIDE_CELLS));
     }
     if (vision->peer_valid && vision->peer_age_ms <= VISION_FRESH_MS) {
-        mark_occupied(cols, rows, coordinate_cell(vision->peer_col, cols),
-                      coordinate_cell(vision->peer_row, rows),
-                      s_competition_target ? 6 : NAV_PEER_RADIUS_CELLS);
+        mark_occupied(cols, rows, vision->peer_col, vision->peer_row,
+                      navigation_peer_clearance());
     }
     if (s_competition_target) {
         for (uint8_t i = 0; i < VISION_MAX_CUBES; ++i) {
             if ((i == s_competition_cube && s_competition_contact) ||
                 !vision->cube_valid[i] ||
                 vision->cubes[i].age_ms > VISION_FRESH_MS) continue;
-            mark_occupied(cols, rows, coordinate_cell(vision->cubes[i].col, cols),
-                          coordinate_cell(vision->cubes[i].row, rows), 8);
+            mark_occupied(cols, rows, vision->cubes[i].col, vision->cubes[i].row,
+                          navigation_square_clearance(vision->cube_side));
         }
     }
     return ESP_OK;
@@ -567,6 +557,7 @@ static void set_motors_locked(int left, int right)
         s_status.phase = NAVIGATION_ERROR;
         s_status.has_target = false;
         s_status.error = err;
+        s_status.failure_reason = NAVIGATION_FAILURE_MOTOR;
     }
 }
 
@@ -612,6 +603,11 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
     if (!s_estimator.initialized || !imu->valid || !imu->calibration_valid ||
         !sensors->infrared_valid ||
         s_estimator.uncertainty_cells > UNCERTAINTY_LIMIT_CELLS) {
+        s_status.failure_reason = !s_estimator.initialized ? NAVIGATION_FAILURE_POSE :
+            !imu->valid ? NAVIGATION_FAILURE_IMU :
+            !imu->calibration_valid ? NAVIGATION_FAILURE_IMU_CALIBRATION :
+            !sensors->infrared_valid ? NAVIGATION_FAILURE_INFRARED :
+            NAVIGATION_FAILURE_UNCERTAINTY;
         finish_locked(NAVIGATION_ERROR, ESP_ERR_INVALID_RESPONSE);
         return;
     }
@@ -623,8 +619,10 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
             s_ultrasonic_sample_ms = sensors->timestamp_ms;
             if (s_ultrasonic_invalid_samples < UINT8_MAX) ++s_ultrasonic_invalid_samples;
         }
-        if (s_ultrasonic_invalid_samples >= SENSOR_INVALID_SAMPLES)
+        if (s_ultrasonic_invalid_samples >= SENSOR_INVALID_SAMPLES) {
+            s_status.failure_reason = NAVIGATION_FAILURE_ULTRASONIC;
             finish_locked(NAVIGATION_ERROR, ESP_ERR_INVALID_RESPONSE);
+        }
         return;
     }
     if (new_ultrasonic_sample) {
@@ -642,6 +640,8 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         s_status.phase = NAVIGATION_REPLANNING;
         const esp_err_t plan_error = plan_route_locked(vision, true);
         if (plan_error != ESP_OK) {
+            s_status.failure_reason = plan_error == ESP_ERR_NOT_FOUND
+                ? NAVIGATION_FAILURE_NO_ROUTE : NAVIGATION_FAILURE_ROUTE;
             finish_locked(plan_error == ESP_ERR_NOT_FOUND ? NAVIGATION_BLOCKED : NAVIGATION_ERROR,
                           plan_error);
             return;
@@ -656,6 +656,8 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         s_status.phase = NAVIGATION_PLANNING;
         const esp_err_t plan_error = plan_route_locked(vision, false);
         if (plan_error != ESP_OK) {
+            s_status.failure_reason = plan_error == ESP_ERR_NOT_FOUND
+                ? NAVIGATION_FAILURE_NO_ROUTE : NAVIGATION_FAILURE_ROUTE;
             finish_locked(plan_error == ESP_ERR_NOT_FOUND ? NAVIGATION_BLOCKED : NAVIGATION_ERROR,
                           plan_error);
             return;
@@ -667,6 +669,8 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         s_status.wait_reason = NAVIGATION_WAIT_PATH_OCCUPIED;
         const esp_err_t plan_error = plan_route_locked(vision, true);
         if (plan_error != ESP_OK) {
+            s_status.failure_reason = plan_error == ESP_ERR_NOT_FOUND
+                ? NAVIGATION_FAILURE_NO_ROUTE : NAVIGATION_FAILURE_ROUTE;
             finish_locked(plan_error == ESP_ERR_NOT_FOUND ? NAVIGATION_BLOCKED : NAVIGATION_ERROR,
                           plan_error);
             return;
@@ -674,6 +678,7 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         s_status.phase = NAVIGATION_TURNING;
     }
     if (s_obstacle_samples >= OBSTACLE_SAMPLES) {
+        s_status.failure_reason = NAVIGATION_FAILURE_ULTRASONIC_OBSTACLE;
         finish_locked(NAVIGATION_BLOCKED, ESP_ERR_INVALID_STATE);
         return;
     }
@@ -959,7 +964,7 @@ static esp_err_t navigation_service_submit_internal(float col, float row,
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
-    if (col < 0 || row < 0 || col > vision.grid_cols || row > vision.grid_rows) {
+    if (col < 0 || row < 0 || col >= vision.grid_cols || row >= vision.grid_rows) {
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_ARG;
     }
@@ -975,6 +980,7 @@ static esp_err_t navigation_service_submit_internal(float col, float row,
     s_status.phase = NAVIGATION_PLANNING;
     s_status.error = ESP_OK;
     s_status.wait_reason = NAVIGATION_WAIT_NONE;
+    s_status.failure_reason = NAVIGATION_FAILURE_NONE;
     s_status.crossings_without_vision = 0;
     s_status.replan_count = 0;
     s_status.route_segment_count = s_status.route_segment_index = 0;
@@ -1029,6 +1035,7 @@ esp_err_t navigation_service_cancel(navigation_cancel_reason_t reason)
     s_status.cancel_reason = reason;
     s_status.error = ESP_OK;
     s_status.wait_reason = NAVIGATION_WAIT_NONE;
+    s_status.failure_reason = NAVIGATION_FAILURE_NONE;
     s_route.valid = false;
     memset(&s_route, 0, sizeof(s_route));
     s_status.crossings_without_vision = 0;

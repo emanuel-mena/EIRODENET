@@ -195,6 +195,7 @@ static esp_err_t state_handler(httpd_req_t *request)
     cJSON_AddNumberToObject(nav_json, "row", navigation.row);
     cJSON_AddNumberToObject(nav_json, "request_id", navigation.request_id);
     cJSON_AddNumberToObject(nav_json, "error", navigation.error);
+    cJSON_AddNumberToObject(nav_json, "failure_reason", navigation.failure_reason);
     cJSON_AddNumberToObject(nav_json, "cancel_reason", navigation.cancel_reason);
     cJSON *pose_json = cJSON_AddObjectToObject(nav_json, "pose");
     cJSON_AddBoolToObject(pose_json, "valid", navigation.pose_valid);
@@ -320,6 +321,9 @@ static esp_err_t peer_state_handler(httpd_req_t *request)
     cJSON_AddNumberToObject(navigation, "col", peer.navigation_col);
     cJSON_AddNumberToObject(navigation, "row", peer.navigation_row);
     cJSON_AddNumberToObject(navigation, "request_id", peer.navigation_request_id);
+    cJSON_AddNumberToObject(navigation, "error", peer.navigation_error);
+    cJSON_AddNumberToObject(navigation, "failure_reason", peer.navigation_failure_reason);
+    cJSON_AddNumberToObject(navigation, "cancel_reason", peer.navigation_cancel_reason);
     vision_status_t vision = {0};
     vision_service_get_status(&vision);
     const bool peer_pose_valid = vision.peer_valid && vision.peer_id == peer.rover_id;
@@ -333,6 +337,19 @@ static esp_err_t peer_state_handler(httpd_req_t *request)
     cJSON_AddNumberToObject(pose, "theta_deg", peer_pose_valid ? peer_heading : 0.0f);
     cJSON_AddNumberToObject(pose, "vision_heading_offset_deg", peer.vision_heading_offset_deg);
     cJSON_AddBoolToObject(pose, "vision_heading_calibrated", peer.vision_heading_calibrated);
+    cJSON *peer_vision = cJSON_AddObjectToObject(navigation, "vision");
+    cJSON_AddBoolToObject(peer_vision, "connected", peer.vision_recent);
+    cJSON_AddBoolToObject(peer_vision, "fresh", peer.vision_recent &&
+                          (uint32_t)peer.vision_frame_age_ms + peer.age_ms <= 750);
+    cJSON_AddNumberToObject(peer_vision, "age_ms",
+                            (uint32_t)peer.vision_frame_age_ms + peer.age_ms);
+    cJSON *peer_grid = cJSON_AddObjectToObject(navigation, "grid_encoder");
+    cJSON_AddBoolToObject(peer_grid, "calibrated", peer.navigation_grid_calibrated);
+    cJSON_AddNumberToObject(peer_grid, "pattern", peer.navigation_grid_pattern);
+    cJSON_AddNumberToObject(peer_grid, "calibrated_mask", peer.navigation_grid_calibrated_mask);
+    cJSON *peer_nav_motors = cJSON_AddObjectToObject(navigation, "motors");
+    cJSON_AddNumberToObject(peer_nav_motors, "left", peer.navigation_motor_left);
+    cJSON_AddNumberToObject(peer_nav_motors, "right", peer.navigation_motor_right);
     cJSON *route = cJSON_AddObjectToObject(navigation, "route");
     cJSON_AddNumberToObject(route, "cell_col", peer.navigation_cell_col);
     cJSON_AddNumberToObject(route, "cell_row", peer.navigation_cell_row);
@@ -542,13 +559,25 @@ static esp_err_t peer_target_handler(httpd_req_t *request)
         cJSON_Delete(body);
         return send_api_error(request, "400 Bad Request", "invalid_target", ESP_ERR_INVALID_ARG);
     }
+    uint32_t request_id = 0;
     const esp_err_t err = peer_comms_service_send_target((float)col->valuedouble,
-                                                         (float)row->valuedouble);
+                                                         (float)row->valuedouble, &request_id);
     cJSON_Delete(body);
-    if (err != ESP_OK) return send_api_error(request, "503 Service Unavailable", "peer_offline", err);
+    peer_comms_status_t peer = {0};
+    if (err == ESP_ERR_INVALID_STATE) peer_comms_service_get_status(&peer);
+    if (err != ESP_OK) return send_api_error(request,
+        err == ESP_ERR_TIMEOUT ? "504 Gateway Timeout" :
+        err == ESP_ERR_INVALID_ARG ? "400 Bad Request" :
+        err == ESP_ERR_INVALID_STATE ? "409 Conflict" : "503 Service Unavailable",
+        err == ESP_ERR_TIMEOUT ? "peer_no_confirmation" :
+        err == ESP_ERR_INVALID_ARG ? "invalid_target" :
+        err == ESP_ERR_INVALID_STATE && !peer.connected ? "peer_offline" :
+        err == ESP_ERR_INVALID_STATE && peer.mode != APP_MODE_TEST ? "test_mode_required" :
+        err == ESP_ERR_INVALID_STATE ? "navigation_not_ready" : "peer_offline", err);
     cJSON *response = cJSON_CreateObject();
     cJSON_AddBoolToObject(response, "ok", true);
     cJSON_AddStringToObject(response, "transport", "esp-now");
+    cJSON_AddNumberToObject(response, "request_id", request_id);
     return send_json(request, response);
 }
 

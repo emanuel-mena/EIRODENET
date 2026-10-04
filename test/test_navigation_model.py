@@ -224,3 +224,10 @@ def test_visual_entities_inflate_occupancy_and_force_a_detour() -> None:
     route = a_star_route(20, 20, (3, 3), (16, 3), blocked - {(3, 3)})
     assert route
     assert all(cell not in blocked for cell in route[1:])
+
+
+def test_border_is_available_and_rover_clearance_uses_full_body() -> None:
+    assert occupied_cells(20, 20, obstacles=[], peer=None) == set()
+    blocked = occupied_cells(30, 30, obstacles=[], peer=(15, 15))
+    assert (15, 23) in blocked
+    assert (15, 25) not in blocked

@@ -73,6 +73,9 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .dpad button:nth-child(1) { grid-column: 2; }.dpad button:nth-child(2) { grid-column: 1; grid-row: 2; }.dpad button:nth-child(3) { grid-column: 2; grid-row: 2; }.dpad button:nth-child(4) { grid-column: 3; grid-row: 2; }.dpad button:nth-child(5) { grid-column: 2; grid-row: 3; }
 .dpad .stop { color: #9b0000; }
 .hint, .nav-state { display: block; margin-top: 10px; text-align: center; color: #3c3c3c; font: .66rem/1.35 'Courier New', monospace; }
+.target-form .nav-state { padding: 7px; border: 1px solid #777; background: #f3f3f3; font: bold .76rem/1.4 'Courier New', monospace; }
+.target-form .nav-state[data-phase="blocked"], .target-form .nav-state[data-phase="error"], .target-form .nav-state[data-phase="cancelled"] { color: #8b0000; background: #fff0ed; border-color: #b64836; }
+.target-form .nav-state[data-phase="waiting_for_vision"] { color: #674500; background: #fff7dd; border-color: #a67b16; }
 .target-form { min-width: 0; }
 .target-form > div { display: flex; gap: 8px; }
 .target-form label { min-width: 0; font: bold .68rem 'Courier New', monospace; }

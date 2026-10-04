@@ -58,6 +58,14 @@ typedef struct {
     uint8_t navigation_blind_crossings;
     uint32_t navigation_replans;
     uint8_t navigation_wait_reason;
+    esp_err_t navigation_error;
+    uint8_t navigation_failure_reason;
+    uint8_t navigation_cancel_reason;
+    bool navigation_grid_calibrated;
+    uint8_t navigation_grid_pattern;
+    uint8_t navigation_grid_calibrated_mask;
+    int16_t navigation_motor_left;
+    int16_t navigation_motor_right;
     int16_t drive_left;
     int16_t drive_right;
     bool link_verified;
@@ -71,6 +79,9 @@ typedef struct {
     uint32_t mode_ack_nonce;
     bool mode_ack_accepted;
     uint8_t mode_ack_reason;
+    uint32_t target_ack_nonce;
+    uint32_t target_ack_request_id;
+    esp_err_t target_ack_error;
 } peer_comms_status_t;
 
 /** Inicia la comunicación ESP-NOW cuando Wi-Fi STA esté operativo. */
@@ -83,7 +94,7 @@ void peer_comms_service_get_status(peer_comms_status_t *status);
 esp_err_t peer_comms_service_send_drive(int16_t left, int16_t right);
 
 /** Envía un objetivo en celdas a la navegación de prueba del compañero. */
-esp_err_t peer_comms_service_send_target(float col, float row);
+esp_err_t peer_comms_service_send_target(float col, float row, uint32_t *request_id);
 /** Solicita entrada a competencia y espera confirmación del compañero. */
 esp_err_t peer_comms_service_request_competition(uint8_t *reason);
 
