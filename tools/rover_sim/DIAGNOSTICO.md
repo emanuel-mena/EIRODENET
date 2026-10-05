@@ -1,5 +1,7 @@
 # Diagnóstico de la primera simulación
 
+Este documento conserva el diagnóstico previo a las correcciones. El comportamiento actualizado y sus pruebas se documentan en [ESTRATEGIA.md](ESTRATEGIA.md).
+
 Ejecución del 5 de octubre de 2026. Ocho escenarios de 15 segundos, paso de 10 ms, semilla 1 y parámetros físicos estimados predeterminados. Los registros completos están en `.pio/sim/acceptance/`; se pueden regenerar con los comandos de la guía. No se modificó la estrategia para hacer pasar estos escenarios.
 
 ## Bloqueo entre aproximación y alineación

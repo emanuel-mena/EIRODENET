@@ -96,7 +96,7 @@ int motion_turn_pwm(float error_deg, float angular_speed_dps, uint32_t tick,
                     bool *settled)
 {
     const float magnitude = fabsf(error_deg);
-    const float toward = copysignf(angular_speed_dps, error_deg);
+    const float toward = angular_speed_dps * (error_deg >= 0 ? 1.0f : -1.0f);
     *settled = magnitude <= 3.0f && fabsf(angular_speed_dps) <= 20.0f;
     if (*settled) return 0;
     /* Initial braking estimate; physical trials will tune deceleration. */

@@ -13,7 +13,7 @@ python -m pip install -r tools/requirements-sim.txt
 python tools/rover_sim.py
 ```
 
-Se requiere `g++` con C++20, disponible en PATH (por ejemplo MSYS2 UCRT64), y el paquete ESP-IDF instalado por PlatformIO. `CXX` permite seleccionar el compilador. El build reutiliza cJSON del paquete ESP-IDF y genera `.pio/sim/rover_host.exe`. En Linux, usar `python3 -m venv tools/.venv`, `source tools/.venv/bin/activate` y g++ del sistema.
+Se requiere `g++` con C++20, disponible en PATH (por ejemplo MSYS2 UCRT64), y el paquete ESP-IDF instalado por PlatformIO. `CXX` permite seleccionar el compilador. El build reutiliza cJSON del paquete ESP-IDF y genera `.pio/sim/rover_host-<hash>.exe`. En Linux, usar `python3 -m venv tools/.venv`, `source tools/.venv/bin/activate` y g++ del sistema.
 
 En este equipo tambiÃ©n quedÃ³ preparado `.pio/sim-venv/Scripts/python.exe` con las dependencias fijadas. Puede ejecutar directamente:
 
@@ -77,3 +77,8 @@ para usar las zonas corregidas, iniciar un escenario nuevo sin `--config` antigu
 
 Los dos rovers comienzan a la izquierda, en (145, 350) y (145, 650) mm,
 mirando a la derecha (0 grados), separados 300 mm entre centros.
+
+
+## Estrategia actual
+
+Consulte [ESTRATEGIA.md](ESTRATEGIA.md) para los cambios del firmware, resultados de entrega completa y limitaciones. El ultrasónico simulado actualiza sus muestras cada 200 ms.

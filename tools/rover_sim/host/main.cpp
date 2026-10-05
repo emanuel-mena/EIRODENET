@@ -87,8 +87,8 @@ int main(int argc,char **argv) {
         if(cJSON_IsObject(get(j,"vision"))) read_frame(get(j,"vision"),id);
         auto s=get(j,"sensors");imu.timestamp_ms=clock_ms;imu.valid=imu.calibration_valid=true;
         imu.sample.accel_g[2]=1;imu.sample.gyro_dps[2]=num(s,"gyro");
-        sensors.timestamp_ms=clock_ms;sensors.infrared_valid=true;sensors.ultrasonic_valid=flag(s,"ultrasonic_valid");
-        sensors.ultrasonic_error=sensors.ultrasonic_valid?ESP_OK:ESP_ERR_TIMEOUT;sensors.distance_mm=num(s,"distance_mm");
+        sensors.timestamp_ms=num(s,"timestamp_ms",clock_ms);sensors.infrared_valid=true;sensors.ultrasonic_valid=flag(s,"ultrasonic_valid");
+        sensors.ultrasonic_error=num(s,"ultrasonic_error",sensors.ultrasonic_valid?ESP_OK:ESP_ERR_TIMEOUT);sensors.distance_mm=num(s,"distance_mm");
         auto ir=get(s,"ir");sensors.infrared={(uint16_t)at(ir,0),(uint16_t)at(ir,1),(uint16_t)at(ir,2),(uint16_t)at(ir,3)};
         auto p=get(j,"peer");if(cJSON_IsObject(p)) {
             last_peer=clock_ms;peer.connected=true;peer.mode=APP_MODE_COMPETITION;

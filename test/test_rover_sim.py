@@ -147,12 +147,58 @@ def test_firmware_diagnostic_and_exact_replay(tmp_path,host_exe):
     try:
         assert sim.controllers[0].p.pid != sim.controllers[1].p.pid
         for _ in range(800):sim.step()
-        assert [r['phase'] for r in sim.status] == [8,8]
-        assert not any(sim.world.delivered())
-        assert sim.status[0]['route'] != sim.status[1]['route']
+        assert any(r['phase'] not in (0,8) for r in sim.status)
+        assert sim.world.snapshot()['rovers'] != config['rovers']
     finally:
         sim.close()
     assert replay(tmp_path/'run/trace.ndjson',host_exe,tmp_path/'replay') == 800
+
+
+@pytest.mark.parametrize('name',['delivery','crossing','vision-loss','peer-loss','delays'])
+def test_real_firmware_completes_deliveries_without_collisions(tmp_path,host_exe,name):
+    sim = Simulation(scenario(name),tmp_path/name,host_exe)
+    try:
+        for _ in range(12000):
+            world = sim.step()
+            assert not world['outside'], (sim.step_id,world['outside'])
+            for contact in world['contacts']:
+                names = contact['objects']
+                assert 'obstacle' not in names
+                assert not (any(n.startswith('rover-10') for n in names) and
+                            any(n.startswith('rover-11') for n in names))
+            if all(world['delivered']) and all(r['phase']==7 for r in sim.status):
+                break
+        assert all(sim.world.delivered()), sim.world.snapshot()
+        assert sim.status[0]['delivered'] | sim.status[1]['delivered'] == 7
+        # Stay finished: an old received mission must not be executed again.
+        for _ in range(100): sim.step()
+        assert all(r['phase']==7 and r['left']==r['right']==0 for r in sim.status)
+    finally:
+        sim.close()
+
+
+def test_ultrasonic_sampling_matches_firmware_period():
+    w = World(scenario())
+    first = w.sensors(0)
+    for _ in range(19): w.advance([(0,0),(0,0)])
+    assert w.sensors(0)['timestamp_ms'] == first['timestamp_ms']
+    w.advance([(0,0),(0,0)])
+    assert w.sensors(0)['timestamp_ms'] == first['timestamp_ms'] + 200
+
+
+def test_ultrasonic_hardware_error_still_stops(tmp_path,host_exe):
+    sim = Simulation(scenario(),tmp_path/'sensor-error',host_exe)
+    sensors = sim.world.sensors
+    def broken(i):
+        return dict(sensors(i),ultrasonic_valid=False,ultrasonic_error=0x103)
+    sim.world.sensors = broken
+    try:
+        for _ in range(400): sim.step()
+        assert any(8 in event['failures'] for event in sim.events)
+        assert all(r['left']==r['right']==0 for r in sim.status)
+        assert sim.world.snapshot()['rovers'] == sim.config['rovers']
+    finally:
+        sim.close()
 
 
 def test_official_depots_and_coordinate_frame():

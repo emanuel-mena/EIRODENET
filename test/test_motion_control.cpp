@@ -1,7 +1,9 @@
 #include "motion_control.hpp"
+#include "navigation_geometry.hpp"
 
 #include <assert.h>
 #include <math.h>
+#include <initializer_list>
 
 int main(void)
 {
@@ -43,8 +45,24 @@ int main(void)
     assert(motion_turn_pwm(90, 0, 0, &settled) == 1000 && !settled);
     assert(motion_turn_pwm(-90, 0, 0, &settled) == -1000 && !settled);
     assert(motion_turn_pwm(10, 100, 0, &settled) == 0 && !settled);
+    assert(motion_turn_pwm(-10, -100, 0, &settled) == 0 && !settled);
+    // Braking must be symmetric, including when inertia opposes the turn.
+    for (float error : {5.0f, 15.0f, 45.0f, 90.0f}) {
+        for (float speed : {-180.0f, -50.0f, 0.0f, 50.0f, 180.0f}) {
+            bool positive_settled, negative_settled;
+            assert(motion_turn_pwm(error, speed, 0, &positive_settled) ==
+                   -motion_turn_pwm(-error, -speed, 0, &negative_settled));
+            assert(positive_settled == negative_settled);
+        }
+    }
     assert(motion_turn_pwm(2, 5, 0, &settled) == 0 && settled);
     assert(motion_turn_pwm(5, 0, 0, &settled) == 700 && !settled);
     assert(motion_turn_pwm(5, 0, 4, &settled) == 0 && !settled);
+    assert(navigation_pose_inside(3.75f, 14, 0, 43, 43));
+    assert(!navigation_pose_inside(3.75f, 14, 180, 43, 43));
+    assert(navigation_turn_inside(3.75f, 14, 90, -180, 43, 43));
+    assert(!navigation_turn_inside(3.75f, 14, 90, 180, 43, 43));
+    assert(navigation_rovers_overlap(20, 20, 0, 25, 20, 180));
+    assert(!navigation_rovers_overlap(20, 20, 0, 20, 26, 0));
     return 0;
 }

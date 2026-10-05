@@ -38,6 +38,7 @@ class Parameters:
     contact_friction: float = 0.5
     cube_floor_deceleration_mm_s2: float = 200.0
     vision_period_ms: int = 50
+    ultrasonic_period_ms: int = 200
     vision_delay_ms: int = 0
     peer_delay_ms: int = 10
     noise_mm: float = 0.0
@@ -102,6 +103,8 @@ class World:
             raise ValueError('Retardos, ruido y fricción no pueden ser negativos.')
         if self.p.vision_period_ms % 10 or int(self.p.substeps)!=self.p.substeps:
             raise ValueError('El período debe ser múltiplo de 10 ms y los subpasos enteros.')
+        if self.p.ultrasonic_period_ms <= 0 or self.p.ultrasonic_period_ms % 10:
+            raise ValueError('El período ultrasónico debe ser un múltiplo positivo de 10 ms.')
         if len(config['rovers'])!=2 or len(config['cubes'])!=3 or len(config['depots'])!=3 or len(config['obstacles'])>32:
             raise ValueError('Se requieren dos rovers, tres cubos, tres depósitos y máximo 32 obstáculos.')
         if self.p.substeps < 10 or self.p.full_speed_mm_s <= 0 or self.p.motor_response_s <= 0:
@@ -116,6 +119,7 @@ class World:
         self.cubes = []
         self.obstacles = []
         self.time_ms = 0
+        self.ultrasonic_samples = [None, None]
         for i, pose in enumerate(config['rovers']):
             b = pymunk.Body(self.p.rover_mass, pymunk.moment_for_box(self.p.rover_mass, (150, 100)))
             b.position = pose[0], 1000-pose[1]
@@ -171,12 +175,16 @@ class World:
             row = 1000-p.y
             black = black_at(p.x,row)
             ir.append(3200 if black else 600)
-        origin = b.local_to_world((47.5,0))
-        end = origin + pymunk.Vec2d(2000,0).rotated(b.angle)
-        hit = self.space.segment_query_first(origin, end, 0, pymunk.ShapeFilter(group=i+1))
-        return dict(ir=ir, gyro=math.degrees(b.angular_velocity),
-                    ultrasonic_valid=hit is not None,
-                    distance_mm=round(hit.alpha*2000) if hit else 2000)
+        stamp = self.time_ms // self.p.ultrasonic_period_ms * self.p.ultrasonic_period_ms
+        cached = self.ultrasonic_samples[i]
+        if cached is None or cached['timestamp_ms'] != stamp:
+            origin = b.local_to_world((47.5,0))
+            end = origin + pymunk.Vec2d(2000,0).rotated(b.angle)
+            hit = self.space.segment_query_first(origin, end, 0, pymunk.ShapeFilter(group=i+1))
+            cached = dict(timestamp_ms=stamp, ultrasonic_valid=hit is not None,
+                          distance_mm=round(hit.alpha*2000) if hit else 2000)
+            self.ultrasonic_samples[i] = cached
+        return dict(ir=ir, gyro=math.degrees(b.angular_velocity), **cached)
 
     def advance(self, commands):
         self.contacts = []

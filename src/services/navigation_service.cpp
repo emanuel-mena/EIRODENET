@@ -37,6 +37,7 @@
 #define ARRIVAL_SAMPLES 5
 #define ARRIVAL_MAX_SPEED_CELLS_S 0.35f
 #define SLOW_PULSE_CONTROL_TICKS 2U
+#define SLOW_PULSE_INTERVAL_MS 150U
 #define ALIGNMENT_SAMPLES 5
 #define MISALIGNMENT_SAMPLES 3
 #define IR_STABLE_SAMPLES 3
@@ -67,10 +68,12 @@ typedef struct {
     float end_col, end_row;
     int8_t delta_col, delta_row;
     uint8_t heading_index;
+    bool reverse;
 } route_segment_t;
 
 typedef struct {
     bool valid;
+    uint8_t grid_cols, grid_rows;
     uint16_t segment_count, segment_index;
     route_segment_t segments[NAV_MAX_SEGMENTS];
     grid_planner_route_t cells;
@@ -92,6 +95,7 @@ static uint8_t s_arrival_samples, s_obstacle_samples;
 static uint8_t s_alignment_samples, s_misalignment_samples;
 static uint8_t s_saturation_samples;
 static uint8_t s_slow_pulse_ticks;
+static uint64_t s_slow_pulse_ms;
 static uint8_t s_ultrasonic_invalid_samples;
 static uint64_t s_ultrasonic_sample_ms;
 static uint8_t s_stable_pattern, s_stable_pattern_samples;
@@ -103,6 +107,7 @@ static bool s_bias_frozen;
 static uint64_t s_last_imu_timestamp_ms;
 static uint32_t s_motion_tick;
 static float s_motor_trim;
+static uint64_t s_heading_still_ms;
 
 static float wrap_degrees(float angle)
 {
@@ -254,8 +259,13 @@ static bool apply_vision(const vision_status_t *vision, uint64_t now_ms)
     } else {
         s_estimator.col += 0.25f * (vision->col - s_estimator.col);
         s_estimator.row += 0.25f * (vision->row - s_estimator.row);
-        s_estimator.theta_deg = blend_angle(s_estimator.theta_deg,
-            vision->theta_deg + s_estimator.vision_heading_offset_deg, 0.18f);
+        // Camera frames can arrive after a turn. Feeding their old heading
+        // back into a calibrated gyro while moving causes overshoot. Reconcile
+        // heading only after a stationary observation window in competition.
+        if (app_mode_get() != APP_MODE_COMPETITION ||
+            (s_heading_still_ms && now_ms - s_heading_still_ms >= 500))
+            s_estimator.theta_deg = blend_angle(s_estimator.theta_deg,
+                vision->theta_deg + s_estimator.vision_heading_offset_deg, 0.18f);
         s_estimator.uncertainty_cells = fmaxf(0.15f, s_estimator.uncertainty_cells * 0.65f);
         if (s_estimator.vision_ms && now_ms > s_estimator.vision_ms) {
             const float dt = (float)(now_ms - s_estimator.vision_ms) / 1000.0f;
@@ -309,6 +319,11 @@ static bool update_estimator(const rover_imu_state_t *imu, const rover_sensor_st
         s_estimator.uncertainty_cells += vision->pose_valid ? 0.0002f : 0.0015f;
         s_status.last_correction = NAVIGATION_CORRECTION_IMU;
     }
+    if (fabsf(s_estimator.angular_speed_dps) > 3.0f || fabsf(s_estimator.speed_cells_s) > 0.2f ||
+        s_status.motor_left || s_status.motor_right)
+        s_heading_still_ms = 0;
+    else if (!s_heading_still_ms)
+        s_heading_still_ms = now_ms;
     const bool new_vision_frame = apply_vision(vision, now_ms);
     s_status.grid_correction_active = false;
     s_status.infrared_pattern = observed;
@@ -338,6 +353,13 @@ static esp_err_t build_occupancy(const vision_status_t *vision)
     const uint8_t cols = (uint8_t)vision->grid_cols;
     const uint8_t rows = (uint8_t)vision->grid_rows;
     memset(s_occupancy, 0, (size_t)cols * rows);
+    if (s_competition_target) {
+        for (uint8_t r = 0; r < rows; ++r)
+            for (uint8_t c = 0; c < cols; ++c)
+                if (c + 0.5f < NAV_BODY_TURN_RADIUS_CELLS || r + 0.5f < NAV_BODY_TURN_RADIUS_CELLS ||
+                    c + 0.5f > cols - NAV_BODY_TURN_RADIUS_CELLS || r + 0.5f > rows - NAV_BODY_TURN_RADIUS_CELLS)
+                    s_occupancy[r * cols + c] = 1;
+    }
     for (uint8_t i = 0; i < vision->obstacle_count; ++i) {
         const vision_position_t *obstacle = &vision->obstacles[i];
         if (obstacle->age_ms > VISION_FRESH_MS) continue;
@@ -366,9 +388,33 @@ static esp_err_t append_segment(float start_col, float start_row, float end_col,
     const int delta_row = sign_float(end_row - start_row);
     if (delta_col == 0 && delta_row == 0) return ESP_OK;
     const uint8_t heading = direction_index(delta_col, delta_row);
+    bool reverse = false;
+    if (s_competition_target) {
+        const float cols = s_route.grid_cols, rows = s_route.grid_rows;
+        const float angle = direction_heading(heading);
+        bool forward = navigation_pose_inside(start_col, start_row, angle, cols, rows) &&
+            navigation_pose_inside(end_col, end_row, angle, cols, rows);
+        // Reverse before reaching the edge, while there is still room to turn
+        // the asymmetric arms (including arrival and braking tolerances).
+        const float turn_margin = 7.2f;
+        if ((delta_col > 0 && end_col > cols - turn_margin) ||
+            (delta_col < 0 && end_col < turn_margin) ||
+            (delta_row > 0 && end_row > rows - turn_margin) ||
+            (delta_row < 0 && end_row < turn_margin)) forward = false;
+        const bool backward = navigation_pose_inside(start_col, start_row, angle + 180, cols, rows) &&
+            navigation_pose_inside(end_col, end_row, angle + 180, cols, rows);
+        if (!forward && !backward) {
+            if (hypotf(end_col - start_col, end_row - start_row) < 2.0f)
+                return ESP_ERR_NOT_FOUND;
+            const float mid_col = (start_col + end_col) / 2, mid_row = (start_row + end_row) / 2;
+            esp_err_t err = append_segment(start_col, start_row, mid_col, mid_row);
+            return err == ESP_OK ? append_segment(mid_col, mid_row, end_col, end_row) : err;
+        }
+        reverse = !forward;
+    }
     if (s_route.segment_count > 0) {
         route_segment_t *previous = &s_route.segments[s_route.segment_count - 1];
-        if (previous->delta_col == delta_col && previous->delta_row == delta_row &&
+        if (previous->delta_col == delta_col && previous->delta_row == delta_row && previous->reverse == reverse &&
             fabsf(previous->end_col - start_col) < 0.001f &&
             fabsf(previous->end_row - start_row) < 0.001f) {
             previous->end_col = end_col;
@@ -382,6 +428,7 @@ static esp_err_t append_segment(float start_col, float start_row, float end_col,
         .end_col = end_col, .end_row = end_row,
         .delta_col = (int8_t)delta_col, .delta_row = (int8_t)delta_row,
         .heading_index = heading,
+        .reverse = reverse,
     };
     return ESP_OK;
 }
@@ -417,7 +464,8 @@ static void publish_current_segment(void)
     }
     const route_segment_t *segment = &s_route.segments[s_route.segment_index];
     s_status.heading_index = segment->heading_index;
-    s_status.desired_heading_deg = direction_heading(segment->heading_index);
+    s_status.desired_heading_deg = wrap_degrees(direction_heading(segment->heading_index) +
+                                               (segment->reverse ? 180.0f : 0.0f));
     s_status.waypoint_col = segment->end_col;
     s_status.waypoint_row = segment->end_row;
 }
@@ -440,6 +488,8 @@ static esp_err_t plan_route_locked(const vision_status_t *vision, bool replannin
     };
     s_occupancy[start.row * cols + start.col] = 0;
     memset(&s_route, 0, sizeof(s_route));
+    s_route.grid_cols = cols;
+    s_route.grid_rows = rows;
     err = grid_planner_plan(cols, rows, s_occupancy, start, goal, &s_route.cells);
     if (err != ESP_OK) return err;
     float cursor_col = s_estimator.col;
@@ -517,7 +567,7 @@ static void update_confirmed_cell(const vision_status_t *vision, bool new_vision
     const int delta_row = candidate_row - s_status.confirmed_cell_row;
     if (delta_col != segment->delta_col || delta_row != segment->delta_row) return;
     const uint8_t expected = expected_pattern(s_estimator.col, s_estimator.row,
-        direction_heading(segment->heading_index), vision->cell_mm);
+        direction_heading(segment->heading_index) + (segment->reverse ? 180.0f : 0.0f), vision->cell_mm);
     if (expected != s_stable_pattern) return;
     if (s_status.crossings_without_vision >= NAV_MAX_BLIND_CROSSINGS) {
         s_status.phase = NAVIGATION_WAITING_FOR_VISION;
@@ -612,7 +662,13 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         return;
     }
     const bool new_ultrasonic_sample = sensors->timestamp_ms != s_ultrasonic_sample_ms;
-    if (!sensors->ultrasonic_valid) {
+    // A missing echo is not a detected obstacle. Only competition can use
+    // fresh, validated vision and its collision-checked route as a fallback.
+    const bool vision_no_echo = s_competition_target &&
+        sensors->ultrasonic_error == ESP_ERR_TIMEOUT && vision->pose_valid &&
+        vision->protocol_valid && vision->connected &&
+        (uint64_t)(esp_timer_get_time() / 1000) - vision->last_valid_frame_ms <= VISION_FRESH_MS;
+    if (!sensors->ultrasonic_valid && !vision_no_echo) {
         set_motors_locked(0, 0);
         s_slow_pulse_ticks = 0;
         if (new_ultrasonic_sample) {
@@ -628,7 +684,7 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
     if (new_ultrasonic_sample) {
         s_ultrasonic_sample_ms = sensors->timestamp_ms;
         s_ultrasonic_invalid_samples = 0;
-        if (sensors->distance_mm <= (s_competition_target ? 30U : OBSTACLE_MM)) {
+        if (sensors->ultrasonic_valid && sensors->distance_mm <= (s_competition_target ? 30U : OBSTACLE_MM)) {
             if (s_obstacle_samples < UINT8_MAX) ++s_obstacle_samples;
         } else {
             s_obstacle_samples = 0;
@@ -769,8 +825,21 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         return;
     }
     s_arrival_samples = 0;
-    const float target_heading = direction_heading(segment->heading_index);
-    const float error = angle_error(target_heading, s_estimator.theta_deg);
+    float target_heading = direction_heading(segment->heading_index);
+    const bool reverse = segment->reverse;
+    if (reverse) target_heading = wrap_degrees(target_heading + 180.0f);
+    float error = angle_error(target_heading, s_estimator.theta_deg);
+    if (s_competition_target &&
+        !navigation_turn_inside(s_estimator.col, s_estimator.row, s_estimator.theta_deg,
+                                error, vision->grid_cols, vision->grid_rows)) {
+        error += error > 0 ? -360.0f : 360.0f;
+        if (!navigation_turn_inside(s_estimator.col, s_estimator.row, s_estimator.theta_deg,
+                                    error, vision->grid_cols, vision->grid_rows)) {
+            s_status.failure_reason = NAVIGATION_FAILURE_ROUTE;
+            finish_locked(NAVIGATION_BLOCKED, ESP_ERR_INVALID_STATE);
+            return;
+        }
+    }
     if (s_status.phase == NAVIGATION_DRIVING) {
         if (fabsf(error) > RETURN_TURN_DEG) {
             if (++s_misalignment_samples >= MISALIGNMENT_SAMPLES) {
@@ -799,7 +868,7 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
                 fabsf(signed_cross) < 0.25f && fabsf(s_estimator.angular_speed_dps) < 15.0f)
                 s_motor_trim = fmaxf(-100.0f, fminf(100.0f,
                     s_motor_trim - 0.15f * s_estimator.angular_speed_dps));
-            motion_drive_command(error, signed_cross, s_estimator.angular_speed_dps,
+            motion_drive_command(error, reverse ? -signed_cross : signed_cross, s_estimator.angular_speed_dps,
                                  s_motor_trim, &left, &right, &saturated);
             s_status.motor_correction_saturated = saturated;
             s_status.motor_trim_pwm = s_motor_trim;
@@ -823,8 +892,11 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
             s_status.motor_correction_saturated = false;
         }
         if (slow) {
-            if (new_vision_frame && s_slow_pulse_ticks == 0)
+            const uint64_t now = (uint64_t)(esp_timer_get_time() / 1000);
+            if (new_vision_frame && s_slow_pulse_ticks == 0 && now - s_slow_pulse_ms >= SLOW_PULSE_INTERVAL_MS) {
                 s_slow_pulse_ticks = SLOW_PULSE_CONTROL_TICKS;
+                s_slow_pulse_ms = now;
+            }
             if (s_slow_pulse_ticks == 0) {
                 set_motors_locked(0, 0);
                 return;
@@ -832,6 +904,11 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
             --s_slow_pulse_ticks;
         } else {
             s_slow_pulse_ticks = 0;
+        }
+        if (reverse) {
+            const int forward_left = left;
+            left = -right;
+            right = -forward_left;
         }
         set_motors_locked(left, right);
     } else {
