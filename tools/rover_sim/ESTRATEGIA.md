@@ -66,3 +66,11 @@ Los registros se conservan en `.pio/sim/v3-validation-20261005-b/`, con `summary
 La ejecución de la seed 42 y dificultad 0,50 con v3 se conserva en `.pio/sim/v3-seed42-20261005-a/`: a 120 s no se asignaron misiones ni hubo entregas. La compatibilidad del contrato no garantiza que la estrategia resuelva todas las distribuciones aleatorias. La validación física sigue pendiente.
 
 Compilación `pio run` correcta para ESP32 con flash de 8 MB. El binario incluye el validador compartido de v3.
+
+## Recuperación de bloqueos y distribuciones aleatorias
+
+La asignación retrasa la misión remota si su primer punto cruza la zona de maniobra del comandante. Si dos rovers activos quedan detenidos frente a frente, el soldado cede hacia una posición observada y replantea desde allí. Un rover aparcado conserva una zona de seguridad más amplia en el planificador de navegación. La estrategia comprueba la orientación del último tramo antes de aceptar un empuje intermedio, vuelve a observar el cubo tras empujarlo y puede posponer un cubo que acumula seis intentos fallidos. Los registros indican falta de ruta, falta de espacio para orientar el chasis o ausencia de una maniobra segura.
+
+Con la seed 42 y dificultad 0,2, las tres entregas físicas, la máscara 7 y ambas retiradas terminaron a los 43,25 s; no hubo contactos entre rovers ni salidas de pista en 120 s. Se conservan escenario, manifiesto, traza, informe y registros en `.pio/sim/strategy-final-seed42-d020-20261005/`.
+
+Con la seed 1 y dificultad 1, el cubo azul se acercó 498 mm a su depósito mediante empujes intermedios, pero ninguno de los tres quedó entregado a 120 s. El cubo verde cercano al borde sigue sin una aproximación con espacio suficiente para orientar el chasis; también bloquea el corredor final del azul. El controlador termina detenido y registra el límite, sin contactos entre rovers ni salidas de pista. La traza está en `.pio/sim/strategy-final-seed1-d100-20261005/`. Por tanto, esta revisión mejora la recuperación pero no garantiza tres entregas para todas las seeds. Hacen falta nuevas maniobras de contacto lateral y una comprobación de alcanzabilidad física antes de prometer esa garantía. No hay validación con placas reales.

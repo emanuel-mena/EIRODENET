@@ -220,6 +220,42 @@ def test_real_firmware_completes_deliveries_without_collisions(tmp_path,host_exe
         sim.close()
 
 
+def test_seed42_dispatches_and_finishes_without_rover_contact(tmp_path,host_exe):
+    config = apply_layout(scenario(),42,.2)
+    sim = Simulation(config,tmp_path/'seed42-d020',host_exe)
+    try:
+        for _ in range(12000):
+            world = sim.step()
+            assert not world['outside']
+            assert not any(any(n.startswith('rover-10') for n in c['objects']) and
+                           any(n.startswith('rover-11') for n in c['objects'])
+                           for c in world['contacts'])
+            if all(world['delivered']) and all(r['phase']==7 for r in sim.status):
+                break
+        assert all(world['delivered'])
+        assert all(r['phase']==7 and r['left']==r['right']==0 for r in sim.status)
+        assert sim.status[0]['delivered'] | sim.status[1]['delivered'] == 7
+    finally:
+        sim.close()
+
+
+def test_edge_seed_uses_observed_intermediate_push(tmp_path,host_exe):
+    config = apply_layout(scenario(),1,1.0)
+    initial = [cube[:2] for cube in config['cubes']]
+    sim = Simulation(config,tmp_path/'seed1-d100',host_exe)
+    try:
+        for _ in range(8000):
+            world = sim.step()
+            assert not world['outside']
+            assert not any(any(n.startswith('rover-10') for n in c['objects']) and
+                           any(n.startswith('rover-11') for n in c['objects'])
+                           for c in world['contacts'])
+        assert any(math.dist(cube[:2],depot) < math.dist(start,depot) - 20
+                   for cube,start,depot in zip(world['cubes'],initial,config['depots']))
+    finally:
+        sim.close()
+
+
 def test_ultrasonic_sampling_matches_firmware_period():
     w = World(scenario())
     first = w.sensors(0)

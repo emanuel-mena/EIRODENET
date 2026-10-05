@@ -9,6 +9,7 @@
 #define NAV_BODY_HALF_LENGTH_CELLS 2.375f
 #define NAV_FRONT_EXTENT_CELLS 5.125f
 #define NAV_BODY_TURN_RADIUS_CELLS 3.5f
+#define NAV_PEER_ROUTE_CLEARANCE_CELLS 11.6f
 
 // Pose is the centre of the 95 mm body; the 55 mm arms extend forwards.
 static inline bool navigation_pose_inside(float col, float row, float heading,

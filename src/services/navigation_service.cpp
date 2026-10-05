@@ -14,6 +14,7 @@
 #include "navigation_geometry.hpp"
 #include "motor_adapter.hpp"
 #include "motion_control.hpp"
+#include "peer_comms_service.hpp"
 #include "rover_service.hpp"
 #include "vision_service.hpp"
 
@@ -367,7 +368,10 @@ static esp_err_t build_occupancy(const vision_status_t *vision)
                       navigation_square_clearance(NAV_OBSTACLE_SIDE_CELLS));
     }
     if (vision->peer_valid && vision->peer_age_ms <= VISION_FRESH_MS) {
+        peer_comms_status_t peer = {};
+        peer_comms_service_get_status(&peer);
         mark_occupied(cols, rows, vision->peer_col, vision->peer_row,
+                      peer.competition_available ? NAV_PEER_ROUTE_CLEARANCE_CELLS :
                       navigation_peer_clearance());
     }
     if (s_competition_target) {
@@ -491,7 +495,12 @@ static esp_err_t plan_route_locked(const vision_status_t *vision, bool replannin
     s_route.grid_cols = cols;
     s_route.grid_rows = rows;
     err = grid_planner_plan(cols, rows, s_occupancy, start, goal, &s_route.cells);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Sin ruta desde (%u,%u) hacia (%u,%u); pose %.2f, %.2f",
+                 start.col, start.row, goal.col, goal.row,
+                 (double)s_estimator.col, (double)s_estimator.row);
+        return err;
+    }
     float cursor_col = s_estimator.col;
     float cursor_row = s_estimator.row;
     const float lattice_offset_col = cursor_col - start.col;
@@ -505,7 +514,11 @@ static esp_err_t plan_route_locked(const vision_status_t *vision, bool replannin
     }
     if (err == ESP_OK && hypotf(s_status.col - cursor_col, s_status.row - cursor_row) > ARRIVAL_CELLS)
         err = append_queen_move(cursor_col, cursor_row, s_status.col, s_status.row);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Ruta sin espacio para orientar el chasis hacia %.2f, %.2f",
+                 (double)s_status.col, (double)s_status.row);
+        return err;
+    }
     s_route.valid = true;
     s_route.occupancy_frame_timestamp_ms = vision->frame_timestamp_ms;
     s_status.confirmed_cell_col = start.col;
@@ -738,7 +751,10 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
         finish_locked(NAVIGATION_BLOCKED, ESP_ERR_INVALID_STATE);
         return;
     }
+    peer_comms_status_t peer_state = {};
+    if (s_competition_target) peer_comms_service_get_status(&peer_state);
     if (s_competition_target && vision->peer_valid &&
+        !peer_state.competition_available &&
         hypotf(vision->peer_col - s_estimator.col,
                vision->peer_row - s_estimator.row) < 11.6f) {
         if (!s_route.valid || s_route.segment_index >= s_route.segment_count) {
