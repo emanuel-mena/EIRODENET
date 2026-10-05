@@ -735,3 +735,8 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation)
     }
     execute_local(&v);
 }
+
+#ifdef EIRO_HOST_SIM
+int competition_sim_phase(void) { return (int)s_phase; }
+const peer_mission_t *competition_sim_mission(void) { return &s_local; }
+#endif

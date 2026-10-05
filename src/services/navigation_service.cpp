@@ -870,79 +870,94 @@ static void publish_status(const vision_status_t *vision)
         s_status.phase = NAVIGATION_IDLE;
 }
 
+// Shared deterministic iteration; the ESP32 task owns scheduling.
+static uint64_t s_tick_previous_ms;
+static bool s_tick_control, s_tick_pending_vision;
+void navigation_service_tick(void)
+{
+    uint64_t &previous_ms = s_tick_previous_ms;
+    bool &control_tick = s_tick_control;
+    bool &pending_vision_frame = s_tick_pending_vision;
+    rover_imu_state_t imu = {0};
+    rover_sensor_state_t sensors = {0};
+    vision_status_t vision = {0};
+    rover_service_get_imu(&imu);
+    rover_service_get_sensors(&sensors);
+    vision_service_get_status(&vision);
+    const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    float dt = (float)(now_ms - previous_ms) / 1000.0f;
+    if (dt <= 0 || dt > 0.1f) dt = 0.01f;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const app_mode_t mode = app_mode_get();
+    const uint32_t generation = app_mode_generation();
+    if (generation != s_bias_generation) {
+        s_bias_generation = generation;
+        s_bias_frozen = false;
+        motion_bias_reset(&s_bias_window);
+        s_status.competition_bias_valid = false;
+        s_status.competition_bias_samples = 0;
+        s_status.competition_gyro_bias_dps = 0;
+        s_estimator.gyro_bias_dps = 0;
+        s_motor_trim = 0;
+        s_status.motor_trim_pwm = 0;
+    }
+    if (mode == APP_MODE_COMPETITION && !s_bias_frozen) {
+        if (vision.phase == VISION_PHASE_RUNNING) {
+            float bias = 0;
+            s_status.competition_bias_valid = motion_bias_result(&s_bias_window, &bias);
+            s_status.competition_gyro_bias_dps = s_status.competition_bias_valid ? bias : 0;
+            s_status.competition_bias_samples = s_bias_window.count;
+            if (s_status.competition_bias_valid) s_estimator.gyro_bias_dps = bias;
+            s_bias_frozen = true;
+            ESP_LOGI(TAG, "Sesgo Z en competencia: %s, %u muestras, %+.4f dps",
+                     s_status.competition_bias_valid ? "valido" : "sin ajuste",
+                     (unsigned)s_bias_window.count, (double)s_status.competition_gyro_bias_dps);
+        } else if (!s_status.motor_left && !s_status.motor_right && imu.valid &&
+                   imu.calibration_valid && vision.phase != VISION_PHASE_FINISHED) {
+            motion_bias_add(&s_bias_window, imu.timestamp_ms, imu.sample.accel_g,
+                            imu.sample.gyro_dps);
+            s_status.competition_bias_samples = s_bias_window.count;
+        } else if (s_status.motor_left || s_status.motor_right) {
+            motion_bias_reset(&s_bias_window);
+            s_status.competition_bias_samples = 0;
+        }
+    }
+    const bool new_vision_frame = update_estimator(&imu, &sensors, &vision, dt, now_ms);
+    pending_vision_frame |= new_vision_frame;
+    publish_status(&vision);
+    update_confirmed_cell(&vision, new_vision_frame);
+    control_tick = !control_tick;
+    if (control_tick || (s_competition_target && s_status.has_target)) {
+        update_controller(&imu, &sensors, &vision, pending_vision_frame);
+        pending_vision_frame = false;
+    }
+    xSemaphoreGive(s_lock);
+    previous_ms = now_ms;
+}
+
+#ifndef EIRO_HOST_SIM
 static void navigation_task(void *argument)
 {
     (void)argument;
     TickType_t wake = xTaskGetTickCount();
-    uint64_t previous_ms = (uint64_t)(esp_timer_get_time() / 1000);
-    bool control_tick = false;
-    bool pending_vision_frame = false;
+    s_tick_previous_ms = (uint64_t)(esp_timer_get_time() / 1000);
     while (true) {
-        rover_imu_state_t imu = {0};
-        rover_sensor_state_t sensors = {0};
-        vision_status_t vision = {0};
-        rover_service_get_imu(&imu);
-        rover_service_get_sensors(&sensors);
-        vision_service_get_status(&vision);
-        const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
-        float dt = (float)(now_ms - previous_ms) / 1000.0f;
-        if (dt <= 0 || dt > 0.1f) dt = 0.01f;
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        const app_mode_t mode = app_mode_get();
-        const uint32_t generation = app_mode_generation();
-        if (generation != s_bias_generation) {
-            s_bias_generation = generation;
-            s_bias_frozen = false;
-            motion_bias_reset(&s_bias_window);
-            s_status.competition_bias_valid = false;
-            s_status.competition_bias_samples = 0;
-            s_status.competition_gyro_bias_dps = 0;
-            s_estimator.gyro_bias_dps = 0;
-            s_motor_trim = 0;
-            s_status.motor_trim_pwm = 0;
-        }
-        if (mode == APP_MODE_COMPETITION && !s_bias_frozen) {
-            if (vision.phase == VISION_PHASE_RUNNING) {
-                float bias = 0;
-                s_status.competition_bias_valid = motion_bias_result(&s_bias_window, &bias);
-                s_status.competition_gyro_bias_dps = s_status.competition_bias_valid ? bias : 0;
-                s_status.competition_bias_samples = s_bias_window.count;
-                if (s_status.competition_bias_valid) s_estimator.gyro_bias_dps = bias;
-                s_bias_frozen = true;
-                ESP_LOGI(TAG, "Sesgo Z en competencia: %s, %u muestras, %+.4f dps",
-                         s_status.competition_bias_valid ? "valido" : "sin ajuste",
-                         (unsigned)s_bias_window.count, (double)s_status.competition_gyro_bias_dps);
-            } else if (!s_status.motor_left && !s_status.motor_right && imu.valid &&
-                       imu.calibration_valid && vision.phase != VISION_PHASE_FINISHED) {
-                motion_bias_add(&s_bias_window, imu.timestamp_ms, imu.sample.accel_g,
-                                imu.sample.gyro_dps);
-                s_status.competition_bias_samples = s_bias_window.count;
-            } else if (s_status.motor_left || s_status.motor_right) {
-                motion_bias_reset(&s_bias_window);
-                s_status.competition_bias_samples = 0;
-            }
-        }
-        const bool new_vision_frame = update_estimator(&imu, &sensors, &vision, dt, now_ms);
-        pending_vision_frame |= new_vision_frame;
-        publish_status(&vision);
-        update_confirmed_cell(&vision, new_vision_frame);
-        control_tick = !control_tick;
-        if (control_tick || (s_competition_target && s_status.has_target)) {
-            update_controller(&imu, &sensors, &vision, pending_vision_frame);
-            pending_vision_frame = false;
-        }
-        xSemaphoreGive(s_lock);
-        previous_ms = now_ms;
+        navigation_service_tick();
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(NAV_PERIOD_MS));
     }
 }
+#endif
 
 esp_err_t navigation_service_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
     if (s_lock == NULL) return ESP_ERR_NO_MEM;
+    #ifdef EIRO_HOST_SIM
+    return ESP_OK;
+    #else
     return xTaskCreatePinnedToCore(navigation_task, "navigation", 7168, NULL, 6,
                                    NULL, 1) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    #endif
 }
 
 static esp_err_t navigation_service_submit_internal(float col, float row,

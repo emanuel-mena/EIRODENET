@@ -265,8 +265,8 @@ puede agregar `--synthetic`; `--no-start` exige que el servidor ya est茅 activo.
 
 ## Sitio web local
 
-`partitions.csv` reserva la partici贸n SPIFFS `static` en `0x400000`, con 2 MiB, y
-conserva la partici贸n TinyML `model` (`data/0x40`) en `0x600000`, con 2 MiB. El
+`partitions.csv` reserva la partici贸n de aplicaci贸n `factory` desde `0x20000`, con
+`0x5E0000` bytes, y la partici贸n SPIFFS `static` en `0x600000`, con 2 MiB. El
 proyecto Vite vanilla est谩 en `web/` y genera sus archivos optimizados en `data/`.
 `tools/build_web.py` se ejecuta como script previo de PlatformIO al cargar firmware,
 compila la p谩gina, crea `.pio/build/esp32dev/spiffs.bin` y la agrega a la misma
@@ -435,3 +435,12 @@ Mantenga el rover suspendido cuando pruebe motores, empiece con una magnitud baj
 termine siempre con `motor_adapter_stop()`. No alimente GPIO del ESP32 con 5 V. Los
 pines GPIO12 y GPIO15 participan en el arranque del ESP32, por lo que el puente H no
 debe forzar niveles incompatibles durante reset.
+
+## Simulaci髇 de los dos rovers en PC
+
+El simulador ejecuta los m骴ulos C++ reales de navegaci髇 y competencia en dos procesos,
+con f韘ica 2D de chasis, brazos r韌idos y cubos. Incluye ventana interactiva, ejecuci髇 sin
+ventana, escenarios de fallos y reproducci髇 exacta de las entradas del controlador.
+Los brazos tienen 3 mm de ancho, sobresalen 55 mm y dejan 94 mm libres entre ellos.
+
+Preparaci髇, l韒ites del modelo y comandos: [gu韆 del simulador](tools/rover_sim/README.md).

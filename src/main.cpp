@@ -6,7 +6,6 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "manual_control_service.hpp"
-#include "model_partition.hpp"
 #include "motor_adapter.hpp"
 #include "navigation_service.hpp"
 #include "peer_comms_service.hpp"
@@ -15,19 +14,6 @@
 #include "vision_service.hpp"
 
 static const char *TAG = "rover";
-
-static void report_model(void)
-{
-    model_partition_info_t model;
-    const esp_err_t err = model_partition_validate(&model);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Modelo: version=%" PRIu32 " longitud=%" PRIu32 " CRC32=%08" PRIX32,
-                 model.model_version, model.model_size, model.crc32);
-    } else {
-        ESP_LOGW(TAG, "Inferencia deshabilitada; modelo ausente o invalido: %s",
-                 esp_err_to_name(err));
-    }
-}
 
 /** @brief Ensambla modos, control, navegación y canales de diagnóstico. */
 extern "C" void app_main(void)
@@ -48,7 +34,6 @@ extern "C" void app_main(void)
     } else {
         ESP_LOGI(TAG, "Arranque NVS numero %" PRIu32, boot_count);
     }
-    report_model();
 
     app_storage_config_t config = {0};
     if (app_storage_get_config(&config) != ESP_OK) {

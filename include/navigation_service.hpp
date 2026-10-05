@@ -111,3 +111,6 @@ esp_err_t navigation_service_cancel(navigation_cancel_reason_t reason);
 void navigation_service_get_status(navigation_status_t *status);
 /** Instala o borra el desfase de visión para la entrada actual en competencia. */
 void navigation_service_set_heading_calibration(float offset_deg, bool calibrated);
+
+/** One iteration; called by the task or deterministic host scheduler. */
+void navigation_service_tick(void);
