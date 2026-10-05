@@ -13,6 +13,9 @@ MARKERS = ((20,20,('111111','111001','100111','101111','111001','111111')),
            (880,20,('111111','111101','111011','100101','110001','111111')),
            (20,880,('111111','101111','101111','110001','101001','111111')),
            (880,880,('111111','100011','111011','101011','110011','111111')))
+ROVER_BODY_LENGTH_MM = 95.0
+MOTOR_AXLE_FROM_REAR_MM = 20.0
+MOTOR_AXLE_FROM_BODY_CENTER_MM = ROVER_BODY_LENGTH_MM/2-MOTOR_AXLE_FROM_REAR_MM
 
 
 def black_at(x,row):
@@ -198,14 +201,21 @@ class World:
             for b, (left,right) in zip(self.rovers, commands):
                 v = (left+right)/2000*self.p.full_speed_mm_s
                 w = (right-left)/1000*self.p.full_speed_mm_s/self.p.wheel_track_mm
-                target = pymunk.Vec2d(v,0).rotated(b.angle)
-                delta = (target-b.velocity)*min(1,dt/self.p.motor_response_s)
                 cap = self.p.traction_accel_mm_s2*dt
+                dw = (w-b.angular_velocity)*min(1,dt/self.p.motor_response_s)
+                next_angular_velocity = b.angular_velocity + max(
+                    -cap/self.p.wheel_track_mm, min(cap/self.p.wheel_track_mm,dw))
+                axle_velocity = pymunk.Vec2d(v,0).rotated(b.angle)
+                axle_offset = pymunk.Vec2d(MOTOR_AXLE_FROM_BODY_CENTER_MM,0).rotated(b.angle)
+                # Differential-drive commands specify the velocity at the motor axle.
+                # Convert it to the body's centre-of-mass velocity for Pymunk.
+                target = axle_velocity - pymunk.Vec2d(-next_angular_velocity*axle_offset.y,
+                                                       next_angular_velocity*axle_offset.x)
+                delta = (target-b.velocity)*min(1,dt/self.p.motor_response_s)
                 if delta.length > cap:
                     delta = delta.normalized()*cap
                 b.apply_impulse_at_world_point(delta*b.mass,b.position)
-                dw = (w-b.angular_velocity)*min(1,dt/self.p.motor_response_s)
-                b.angular_velocity += max(-cap/self.p.wheel_track_mm, min(cap/self.p.wheel_track_mm,dw))
+                b.angular_velocity = next_angular_velocity
             for b in self.cubes:
                 speed = b.velocity.length
                 if speed:

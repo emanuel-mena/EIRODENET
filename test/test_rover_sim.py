@@ -71,6 +71,18 @@ def test_arm_side_contact_and_turn():
     assert (w.cubes[0].position-(277.5,482)).length > 2
 
 
+def test_in_place_turn_pivots_at_motor_axle():
+    w = contact_world()
+    b = w.rovers[0]
+    axle_start = b.local_to_world((27.5,0))
+    for _ in range(100):
+        w.advance([(-500,500),(0,0)])
+    axle_end = b.local_to_world((27.5,0))
+    # The motor response estimate allows a small transient displacement while
+    # angular speed ramps up; the body must still rotate around the axle.
+    assert (axle_end-axle_start).length < 6
+
+
 def test_physical_delivery_checks_rotated_corners():
     w = World(scenario())
     b = w.cubes[0]
