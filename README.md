@@ -310,14 +310,14 @@ antes del fallo y se muestra el motivo del siguiente arranque.
 Coloque ambos rovers cerca de la salida publicada por el servidor, en el centro
 del lado izquierdo de la cancha efectiva. Deben estar apoyados sobre la cuadrícula,
 quietos y con el frente alineado con el eje `col`, apuntando hacia el interior: en el
-contrato v2 esto es `theta = 0°`, dirección de `col` creciente. Mantenga visibles
+contrato v3 esto es `theta = 0°`, dirección de `col` creciente. Mantenga visibles
 los marcadores ArUco de ambos rovers y no los mueva mientras se toman las cinco
 capturas de calibración. La corrección supone esa orientación física; si un rover
 está inclinado al entrar, el desfase calculado incorporará esa inclinación como
 si fuera un error del sistema de visión.
 
 Antes de pulsar BOOT o usar el botón web, configure en cada rover su identidad (10 u 11), la MAC del
-compañero, Wi-Fi y la dirección del servidor de visión v2. Ambos deben usar el
+compañero, Wi-Fi y la dirección del servidor de visión v3. Ambos deben usar el
 mismo firmware ESP-NOW v8. El servidor debe ver la cancha y los marcadores y
 llegar a `READY` con tiempo para completar la verificación y las cinco capturas.
 La IMU debe estar calibrada y los infrarrojos operativos para que después se
@@ -355,7 +355,7 @@ Los destellos rojos siguen reservados para fallos de verificación.
 | Destellos rojos por grupo | Paso fallido | Qué significa y qué revisar |
 |---:|---|---|
 | 1 | Wi-Fi | El rover no obtuvo conexión con dirección IPv4 en 15 segundos. Revise las credenciales, el punto de acceso y la asignación de IP. |
-| 2 | Datos del servidor | No llegó una trama válida del servidor TCP en 5 segundos. Revise `server_ipv4`, `server_port`, la conexión de red y el contrato v2. No se requiere que el servidor responda a ping. |
+| 2 | Datos del servidor | No llegó una trama válida del servidor TCP en 5 segundos. Revise `server_ipv4`, `server_port`, la conexión de red y el contrato v3. No se requiere que el servidor responda a ping. |
 | 3 | Enlace ESP-NOW | No llegó la respuesta del compañero en 5 segundos. Revise su alimentación, la MAC `peer_mac`, el canal Wi-Fi y que ambos tengan el protocolo ESP-NOW v8. |
 | 4 | `WHO_AM_I` | No llegó la identidad en 5 segundos, es inválida o coincide con la propia. Configure uno como Rover 10 y el otro como Rover 11. |
 | 5 | Comparación de MAC | No se pudo leer la MAC STA propia, falta la MAC del compañero o ambas son iguales. Revise `peer_mac` en la configuración. |
@@ -369,7 +369,7 @@ para navegación sobre una ruta A* de ocho direcciones. Los comandos destinados 
 otra vez en el rover receptor. En modo competencia los controles manuales quedan
 deshabilitados.
 
-La navegación exige primero una pose v2 fresca del servidor configurado, una IMU
+La navegación exige primero una pose v3 fresca del servidor configurado, una IMU
 calibrada y una lectura válida de infrarrojos. Si falta cualquiera de estas
 precondiciones, la API rechaza el objetivo sin activar los motores. Un objetivo puede
 quedar aceptado durante un timeout ultrasónico, pero los motores permanecen detenidos

@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict, dataclass
 
 import pymunk
-from vision_client.core import VisionConfig
+from vision_client.core import ContractValidator, VisionConfig
 
 COLORS = ('green', 'blue', 'red')
 # Six-by-six marker cells transcribed from the supplied one-metre PDF.
@@ -64,6 +64,7 @@ def scenario(name='delivery'):
              start=start,
              depot_size_mm=[places['tamano_deposito_mm']['largo'],places['tamano_deposito_mm']['fondo']],
              layout_source=str(source))
+    s['referee_tolerance_mm'] = official['conteo_acopio']['tolerancia_mm']
     if name == 'crossing':
         s['cubes'] = [[700, 400, 0], [300, 400, 0], [500, 550, 0]]
     elif name == 'obstacles':
@@ -88,6 +89,7 @@ SCENARIOS = ('delivery', 'crossing', 'obstacles', 'blocked', 'edge',
 class World:
     def __init__(self, config):
         self.config = config
+        self.referee = ContractValidator(VisionConfig.from_environment().vision_system)
         # Saved old scenarios retain their original coordinate system for replay.
         self.grid = config.get('grid',dict(cols=50,rows=50,cell_mm=20.0))
         self.origin = config.get('origin_mm',[0,0])
@@ -249,13 +251,20 @@ class World:
             x,row,theta = self.pose(b)
             col,row = self.to_grid(x+self.rng.gauss(0,self.p.noise_mm),row+self.rng.gauss(0,self.p.noise_mm))
             return dict(col=col,row=row,age_ms=0)
-        return dict(v=2, seq=sequence, ts_ms=time_ms,
+        depot_size = dict(length=self.depot_size[0]/self.grid['cell_mm'],depth=self.depot_size[1]/self.grid['cell_mm'])
+        depots = [dict(color=c,**dict(zip(('col','row'),self.to_grid(x,y)))) for c,(x,y) in zip(COLORS,self.config['depots'])]
+        rovers = [dict(id=10+i,theta=self.pose(b)[2],**pos(b)) for i,b in enumerate(self.rovers)]
+        cubes = [dict(color=COLORS[i],**pos(b)) for i,b in enumerate(self.cubes)]
+        for cube,depot in zip(cubes,depots):
+            cube['in_depot'] = self.referee.cube_in_depot(cube,depot,self.grid,depot_size,
+                60/self.grid['cell_mm'],self.config.get('referee_tolerance_mm',0)/self.grid['cell_mm'])
+        return dict(v=3, seq=sequence, ts_ms=time_ms,
                     phase='READY' if time_ms<3000 else 'RUNNING',
                     clock=dict(elapsed_ms=elapsed,remaining_ms=max(0,180000-elapsed),total_ms=max(180000,elapsed)),
                     grid=dict(self.grid), cube_side=60/self.grid['cell_mm'],
-                    depot_size=dict(length=self.depot_size[0]/self.grid['cell_mm'],depth=self.depot_size[1]/self.grid['cell_mm']),
+                    depot_size=depot_size,
                     start=dict(zip(('col','row'),self.to_grid(*self.start))),
-                    rovers=[dict(id=10+i,theta=self.pose(b)[2],**pos(b)) for i,b in enumerate(self.rovers)],
-                    cubes=[dict(color=COLORS[i],**pos(b)) for i,b in enumerate(self.cubes)],
+                    rovers=rovers,
+                    cubes=cubes,
                     obstacles=[pos(b) for b in self.obstacles],
-                    depots=[dict(color=c,**dict(zip(('col','row'),self.to_grid(x,y)))) for c,(x,y) in zip(COLORS,self.config['depots'])])
+                    depots=depots)

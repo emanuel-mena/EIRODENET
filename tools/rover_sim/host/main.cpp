@@ -9,6 +9,7 @@
 #include "peer_comms_service.hpp"
 #include "rover_service.hpp"
 #include "vision_service.hpp"
+#include "vision_contract.hpp"
 #include "motor_adapter.hpp"
 
 static uint64_t clock_ms;
@@ -59,7 +60,9 @@ esp_err_t peer_comms_service_send_mission_fragment(const peer_mission_t *m,uint8
     }
     cJSON_AddItemToArray(outbox,j);return ESP_OK;
 }
-static void read_frame(cJSON *f,int id) {
+static bool read_frame(cJSON *f,int id) {
+    const cJSON *own=nullptr;uint16_t cols=0,rows=0;float cell=0;
+    if(!vision_contract_validate(f,&own,id,&cols,&rows,&cell)) return false;
     vision={};vision.configured=vision.connected=vision.protocol_valid=true;
     vision.sequence=num(f,"seq");vision.frame_timestamp_ms=num(f,"ts_ms");
     vision.received_ms=vision.last_valid_frame_ms=clock_ms;
@@ -72,9 +75,10 @@ static void read_frame(cJSON *f,int id) {
         if(num(p,"id")==id) { vision.pose_valid=true;vision.rover_id=id;vision.col=num(p,"col");vision.row=num(p,"row");vision.theta_deg=num(p,"theta");vision.age_ms=num(p,"age_ms"); }
         else {vision.peer_valid=true;vision.peer_id=num(p,"id");vision.peer_col=num(p,"col");vision.peer_row=num(p,"row");vision.peer_theta_deg=num(p,"theta");vision.peer_age_ms=num(p,"age_ms");}
     }
-    cJSON_ArrayForEach(p,get(f,"cubes")) {int c=color(p);vision.cube_valid[c]=true;vision.cubes[c]={(float)num(p,"col"),(float)num(p,"row"),(uint32_t)num(p,"age_ms")};}
+    cJSON_ArrayForEach(p,get(f,"cubes")) {int c=color(p);vision.cube_valid[c]=true;vision.cube_in_depot[c]=flag(p,"in_depot");vision.cubes[c]={(float)num(p,"col"),(float)num(p,"row"),(uint32_t)num(p,"age_ms")};}
     cJSON_ArrayForEach(p,get(f,"depots")) {int c=color(p);vision.depot_valid[c]=true;vision.depot_col[c]=num(p,"col");vision.depot_row[c]=num(p,"row");}
     cJSON_ArrayForEach(p,get(f,"obstacles")) {if(vision.obstacle_count<32)vision.obstacles[vision.obstacle_count++]={(float)num(p,"col"),(float)num(p,"row"),(uint32_t)num(p,"age_ms")};}
+    return true;
 }
 int main(int argc,char **argv) {
     int id=argc>1?std::stoi(argv[1]):10;
@@ -84,7 +88,7 @@ int main(int argc,char **argv) {
         auto j=cJSON_Parse(line.c_str());if(!j) return 2;
         auto step=(uint64_t)num(j,"step");if(step!=previous_step+1){cJSON_Delete(j);return 3;}previous_step=step;
         clock_ms=num(j,"time_ms");outbox=cJSON_CreateArray();
-        if(cJSON_IsObject(get(j,"vision"))) read_frame(get(j,"vision"),id);
+        if(cJSON_IsObject(get(j,"vision")) && !read_frame(get(j,"vision"),id)) {cJSON_Delete(outbox);cJSON_Delete(j);return 4;}
         auto s=get(j,"sensors");imu.timestamp_ms=clock_ms;imu.valid=imu.calibration_valid=true;
         imu.sample.accel_g[2]=1;imu.sample.gyro_dps[2]=num(s,"gyro");
         sensors.timestamp_ms=num(s,"timestamp_ms",clock_ms);sensors.infrared_valid=true;sensors.ultrasonic_valid=flag(s,"ultrasonic_valid");

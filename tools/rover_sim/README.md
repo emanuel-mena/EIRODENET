@@ -79,6 +79,40 @@ Los dos rovers comienzan a la izquierda, en (145, 350) y (145, 650) mm,
 mirando a la derecha (0 grados), separados 300 mm entre centros.
 
 
+## Posiciones por seed de Vision Rover Challenge
+
+En `docs/index.html` del repositorio indicado por `VISION_CHALLENGE_REPO`, introduce
+una seed (entero de 0 a 4294967295) y la dificultad (0 a 1), y pulsa **Aplicar seed y
+dificultad**. Usa esos mismos valores en el simulador:
+
+```powershell
+& .pio/sim-venv/Scripts/python.exe tools/rover_sim.py --seed 42 --difficulty 0.50
+& .pio/sim-venv/Scripts/python.exe tools/rover_sim.py --seed 42 --difficulty 0.50 --headless --seconds 120 --output .pio/sim/seed-42-d050
+```
+
+La ventana también permite introducir **Seed** y **Dificultad** y pulsar **Aplicar
+posiciones**; crea otra ejecución pausada con su propio registro. **Reiniciar**
+conserva las posiciones. Sin `--seed` se mantienen los escenarios de regresión.
+La misma seed y dificultad reproducen los mismos cubos con Mulberry32; cambia la
+seed para obtener otra distribución. Las coordenadas de la página se giran 90°
+en sentido horario para que su salida inferior coincida con la salida izquierda
+del simulador, conservando el color de cada cubo y las zonas oficiales del firmware.
+La seed reproduce la distribución original, antes de mover cubos manualmente.
+`scenario.json` conserva posiciones, seed, dificultad y coordenadas de la página;
+`--config` reproduce ese archivo y no se combina con `--seed` ni `--replay`.
+Una distribución aleatoria puede bloquear la estrategia; no garantiza tres entregas.
+
 ## Estrategia actual
+
+El firmware y el host aceptan exclusivamente el contrato v3 y comparten el
+validador C++. Cada cubo requiere `in_depot` booleano; la estrategia confirma la
+entrega con ese veredicto del árbitro únicamente mientras la detección es fresca.
+El simulador usa `geometria_depot()` y `cubo_en_depot()` del clon de visión para
+publicarlo, con `conteo_acopio.tolerancia_mm` guardada como `referee_tolerance_mm`
+en el escenario. La comprobación física de las cuatro esquinas sigue siendo
+independiente: puede discrepar del criterio conservador del árbitro y su tolerancia.
+Los registros contienen el veredicto en las entradas de visión y la entrega física
+en el estado del mundo. Las trazas v2 requieren el controlador anterior para su
+reproducción exacta; los escenarios JSON conservados pueden ejecutarse con v3.
 
 Consulte [ESTRATEGIA.md](ESTRATEGIA.md) para los cambios del firmware, resultados de entrega completa y limitaciones. El ultrasónico simulado actualiza sus muestras cada 200 ms.

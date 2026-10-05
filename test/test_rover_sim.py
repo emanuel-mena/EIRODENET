@@ -2,14 +2,19 @@ import copy
 import json
 import math
 import sys
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
 from rover_sim.world import World, scenario, SCENARIOS, black_at
-from rover_sim.runner import Simulation, replay
+from rover_sim.runner import Controller, Simulation, replay
 from rover_sim.build import build
+from rover_sim.layout import challenge_layout, apply_layout
+from vision_client.core import VisionConfig
 
 
 @pytest.fixture(scope='session')
@@ -81,6 +86,44 @@ def test_seed_repeatability():
     for _ in range(50):
         a.advance([(700,750),(0,0)]);b.advance([(700,750),(0,0)])
     assert a.snapshot() == b.snapshot()
+
+
+def test_seed_layout_matches_challenge_page():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node se usa sólo para comparar contra el JavaScript de la página.')
+    page = VisionConfig.from_environment().challenge_repo/'docs/index.html'
+    html = page.read_text(encoding='utf-8')
+    constants = re.search(r'  const SIZE = .*?;',html).group()
+    goals = re.search(r'  const goals = \{.*?\n  \};',html,re.S).group()
+    keys = re.search(r'  const keys = .*?;',html).group()
+    robots = re.search(r'  const robots = .*?;',html).group()
+    functions = html[html.index('  const clamp ='):html.index('  function drawGoal')]
+    cases = [[s,d] for s in (0,1,42,2026,4294967295) for d in (0,.09,.28,.5,.53,.77,.91,1)]
+    script = constants+goals+keys+robots+functions
+    script += '\nconsole.log(JSON.stringify('+json.dumps(cases)+'.map(([seed,level])=>{random=mulberry32(seed);return randomLayout(level)})));'
+    actual = json.loads(subprocess.run([node,'-e',script],check=True,capture_output=True,text=True).stdout)
+    assert actual == [challenge_layout(s,d) for s,d in cases]
+
+
+def test_seed_layout_conversion_and_preservation():
+    config = scenario('vision-loss')
+    original = copy.deepcopy(config)
+    apply_layout(config,42,.5)
+    assert config == apply_layout(copy.deepcopy(original),42,.5)
+    assert config['cubes'] != apply_layout(copy.deepcopy(original),43,.5)['cubes']
+    cubes = {c['key']:c for c in config['challenge_layout']['cubes']}
+    for color,pose in zip(('green','blue','red'),config['cubes']):
+        c = cubes[color]
+        assert pose == [1000-(c['y']+1.5)*20,(c['x']+1.5)*20,0]
+    for key in ('rovers','depots','parameters','faults','grid','origin_mm'):
+        assert config[key] == original[key]
+
+
+@pytest.mark.parametrize('seed,difficulty',[(-1,.5),(2**32,.5),(1,-.1),(1,1.1),(1,float('nan'))])
+def test_seed_layout_rejects_invalid_values(seed,difficulty):
+    with pytest.raises(ValueError):
+        challenge_layout(seed,difficulty)
 
 
 def test_floor_markers_and_clearance():
@@ -251,5 +294,72 @@ def test_invalid_contract_never_reaches_controller(tmp_path,host_exe):
         with pytest.raises(ValueError,match='rechazada'):sim.step()
         assert all(c.p.poll() is None for c in sim.controllers)
         assert sim.world.time_ms==0
+    finally:
+        sim.close()
+
+
+@pytest.mark.parametrize('value',[None,0,1,'true'])
+def test_firmware_parser_rejects_missing_or_non_boolean_verdict(tmp_path,host_exe,value):
+    frame = World(scenario()).frame(3000,1)
+    if value is None:
+        del frame['cubes'][0]['in_depot']
+    else:
+        frame['cubes'][0]['in_depot'] = value
+    c = Controller(host_exe,10,tmp_path/'parser.log')
+    try:
+        with pytest.raises(RuntimeError,match='terminó'):
+            c.step(dict(step=1,time_ms=3000,vision=frame,sensors={}))
+        assert c.p.wait(timeout=2) == 4
+    finally:
+        c.close()
+
+
+def test_firmware_parser_accepts_v3_and_rejects_v2(tmp_path,host_exe):
+    frame = World(scenario()).frame(3000,1)
+    for version in (3,2):
+        c = Controller(host_exe,10,tmp_path/f'parser-{version}.log')
+        try:
+            frame['v'] = version
+            if version == 3:
+                assert c.step(dict(step=1,time_ms=3000,vision=frame,sensors={}))['step'] == 1
+            else:
+                with pytest.raises(RuntimeError,match='terminó'):
+                    c.step(dict(step=1,time_ms=3000,vision=frame,sensors={}))
+        finally:
+            c.close()
+
+
+def test_v3_referee_geometry_and_physical_delivery_are_independent():
+    w = World(scenario())
+    x,row = w.config['depots'][0]
+    # A rotated cube physically fits, but its centre exceeds the referee's
+    # conservative half-diagonal window, even with the official tolerance.
+    w.cubes[0].position = x+65,1000-row
+    frame = w.frame(3000,1)
+    assert frame['v'] == 3
+    assert w.referee.validate(frame) is None
+    assert w.delivered()[0]
+    assert frame['cubes'][0]['in_depot'] is False
+    w.cubes[0].position = x,1000-row
+    assert w.frame(3050,2)['cubes'][0]['in_depot'] is True
+    w.cubes[0].position = x+59,1000-row
+    assert w.frame(3100,3)['cubes'][0]['in_depot'] is True
+    w.config['referee_tolerance_mm'] = 0
+    assert w.frame(3150,4)['cubes'][0]['in_depot'] is False
+
+
+def test_firmware_obeys_referee_even_when_coordinates_are_outside(tmp_path,host_exe):
+    sim = Simulation(scenario(),tmp_path,host_exe)
+    frame = sim.world.frame
+    def referee_says_delivered(*args):
+        message = frame(*args)
+        for cube in message['cubes']:
+            cube['in_depot'] = True
+        return message
+    sim.world.frame = referee_says_delivered
+    try:
+        for _ in range(350):sim.step()
+        assert not any(sim.world.delivered())
+        assert all(r['phase'] == 0 and not r['route'] and r['left'] == r['right'] == 0 for r in sim.status)
     finally:
         sim.close()

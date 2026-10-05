@@ -2,7 +2,8 @@ import math
 import sys
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from .layout import apply_layout
 from .runner import Simulation
 from .world import MARKERS
 
@@ -75,6 +76,19 @@ class Window(QMainWindow):
         root = QWidget();layout = QVBoxLayout(root)
         title = QLabel('Dos rovers · brazos rígidos 3 × 55 mm · hueco 94 mm')
         layout.addWidget(title)
+        controls = QHBoxLayout()
+        saved = config.get('challenge_layout',{})
+        self.seed_input = QLineEdit(str(saved.get('seed',config['seed'])))
+        self.seed_input.setAccessibleName('Seed de Vision Rover Challenge')
+        self.seed_input.setMaximumWidth(130)
+        self.difficulty_input = QDoubleSpinBox()
+        self.difficulty_input.setRange(0,1);self.difficulty_input.setSingleStep(.01)
+        self.difficulty_input.setValue(saved.get('difficulty',.5))
+        controls.addWidget(QLabel('Seed:'));controls.addWidget(self.seed_input)
+        controls.addWidget(QLabel('Dificultad:'));controls.addWidget(self.difficulty_input)
+        generate = QPushButton('Aplicar posiciones');generate.clicked.connect(self.generate_layout)
+        controls.addWidget(generate);controls.addStretch()
+        layout.addLayout(controls)
         self.arena = Arena(self);layout.addWidget(self.arena,1)
         self.status_label = QLabel();self.status_label.setWordWrap(True);layout.addWidget(self.status_label)
         row = QHBoxLayout()
@@ -110,6 +124,16 @@ class Window(QMainWindow):
         self.pause();self.sim.close();self.run_number += 1
         self.sim = Simulation(self.config,self.output/f'run-{self.run_number:03d}',self.exe)
         self.refresh()
+
+    def generate_layout(self):
+        import copy
+        try:
+            config = apply_layout(copy.deepcopy(self.config),int(self.seed_input.text()),self.difficulty_input.value())
+        except ValueError as exc:
+            QMessageBox.warning(self,'Seed inválida',str(exc))
+            return
+        self.config = config
+        self.reset()
 
     def closeEvent(self,event):
         self.pause();self.sim.close();event.accept()

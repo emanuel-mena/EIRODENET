@@ -6,9 +6,9 @@ Validación del 5 de octubre de 2026. El simulador compila los mismos servicios 
 
 La navegación de competencia puede continuar sin eco ultrasónico únicamente con visión válida y reciente y una ruta comprobada. Un error de hardware distinto de timeout mantiene la parada. La pérdida de visión o del compañero sigue deteniendo el movimiento y permite replantear al recuperar los datos.
 
-El punto de aproximación queda a 166 mm del centro del cubo. La alineación comprueba el radio de giro de los brazos y el espacio del cubo antes de comenzar la captura. La navegación conserva el cubo como obstáculo hasta terminar la aproximación. El frenado angular ahora calcula correctamente la velocidad hacia el objetivo tanto para giros positivos como negativos.
+El punto de aproximación queda a 166 mm del centro del cubo. La alineación comprueba el radio de giro de los brazos y el espacio del cubo antes de comenzar la captura; la ventana frontal admite hasta 6 celdas para tolerar el margen de llegada de navegación junto al umbral ultrasónico. La navegación conserva el cubo como obstáculo hasta terminar la aproximación. El frenado angular ahora calcula correctamente la velocidad hacia el objetivo tanto para giros positivos como negativos.
 
-La asignación comprueba también el corredor de empuje hasta el depósito. Si un cubo bloquea otro, se busca primero una entrega accesible; no es obligatorio encontrar dos misiones simultáneas. El comandante despacha una misión activa a la vez, para evitar que dos rutas o empujes se bloqueen mutuamente. El soldado recuerda el identificador de la última misión recibida por separado de sus replanteamientos locales, evitando repetir una orden ya completada.
+La asignación comprueba también el corredor de empuje hasta el depósito. Si un cubo bloquea otro, se busca primero una entrega accesible; no es obligatorio encontrar dos misiones simultáneas. Para evitar que las rutas se bloqueen al salir, el comandante espera hasta alejarse del punto de aproximación remoto; luego despacha la segunda misión mientras continúa con la suya. Así los rovers pueden navegar y trabajar en paralelo cuando hay espacio. El soldado recuerda el identificador de la última misión recibida por separado de sus replanteamientos locales, evitando repetir una orden ya completada.
 
 Las maniobras junto al borde consideran el cuerpo de 95 × 100 mm y los brazos que sobresalen 55 mm hacia delante. Los tramos pueden recorrerse marcha atrás y el cambio de orientación se prepara antes de llegar al borde. La comprobación entre rovers utiliza sus envolventes orientadas cuando el compañero está disponible; un compañero activo conserva espacio adicional de maniobra.
 
@@ -20,7 +20,7 @@ Escenarios oficiales, semilla 1, física predeterminada y paso de 10 ms. Los tie
 
 | Escenario | Tiempo hasta entrega y retirada completas |
 |---|---:|
-| delivery | 60,35 s |
+| delivery | 46,45 s |
 | crossing | 104,80 s |
 | vision-loss | 55,05 s |
 | peer-loss | 55,05 s |
@@ -28,7 +28,9 @@ Escenarios oficiales, semilla 1, física predeterminada y paso de 10 ms. Los tie
 
 Los registros de esta validación están en `.pio/sim/strategy-validation/`; `summary.json` enlaza los informes individuales. Cada ejecución conserva su escenario, manifiesto con hashes, entradas, salidas, posiciones físicas y registros del controlador. El test de reproducción exacta vuelve a ejecutar 800 pasos con las mismas entradas.
 
-Validación ejecutada: `pio run` correcto para ESP32 con flash de 8 MB; 27 tests del simulador; 30 tests de GUI y modelo de navegación; ejecutable C++ de control de movimiento y geometría. Las regresiones incluyen frenado simétrico, margen de giro, ritmo de muestreo, error ultrasónico de hardware, parada ante pérdida de entradas, entregas físicas y rechazo de misiones repetidas.
+En la ejecución `delivery` de esta revisión, ambas misiones estuvieron activas a la vez entre 11,46 y 21,44 s, con comandos de motor simultáneos durante 1,85 s. Las tres entregas físicas y la retirada terminaron a los 46,45 s; no hubo contactos ni salidas de pista. `crossing` terminó sus tres entregas a los 104,80 s, también sin contactos ni salidas. Los informes completos están en `.pio/sim/tandem-after-20261005-e/` y `.pio/sim/tandem-crossing-20261005/`.
+
+Validación ejecutada: `pio run` correcto para ESP32 con flash de 8 MB; 27 tests del simulador. Las regresiones incluyen frenado simétrico, margen de giro, ritmo de muestreo, error ultrasónico de hardware, parada ante pérdida de entradas, entregas físicas y rechazo de misiones repetidas.
 
 ```powershell
 & .pio/sim-venv/Scripts/python.exe tools/rover_sim.py
@@ -43,3 +45,24 @@ Cada revisión genera un ejecutable `rover_host-<hash>.exe`, permitiendo compila
 Los escenarios `obstacles`, `blocked` y `edge` conservan pruebas de contrato y ejecución finita, pero no se consideran pruebas de tres entregas completas. Algunas posiciones de obstáculos de esos escenarios producen contacto inicial con los brazos; otros casos no ofrecen un corredor recto de empuje. La estrategia todavía no planifica empujes con varios cambios de dirección ni reubicaciones temporales de cubos.
 
 Esta validación usa parámetros físicos estimados y no sustituye la prueba con los rovers reales, ruido de cámara, tracción medida y tareas concurrentes. El firmware compilado está listo para esa validación física; esta tarea no incluye una carga a las placas.
+
+
+## Migración al contrato v3
+
+El firmware y el host comparten `vision_contract_validate()` y aceptan únicamente v3. Cada cubo requiere `in_depot` booleano; la estrategia usa ese veredicto con detecciones frescas, sin recalcularlo a partir de coordenadas. El simulador publica el resultado de `geometria_depot()` y `cubo_en_depot()` del contrato con la tolerancia oficial de 2,5 mm guardada en el escenario. La entrega física sigue comprobándose con las cuatro esquinas del cubo.
+
+Validación del 5 de octubre de 2026 con los servicios C++ actuales. Los cinco escenarios completaron tres entregas físicas, máscara combinada 7 y ambos rovers terminados y detenidos durante un segundo adicional, sin choques entre rovers u obstáculos ni salidas de pista en toda la traza.
+
+| Escenario | Entrega y retirada completas con v3 |
+|---|---:|
+| delivery | 46,60 s |
+| crossing | 115,25 s |
+| vision-loss | 47,95 s |
+| peer-loss | 46,30 s |
+| delays | 67,00 s |
+
+Los registros se conservan en `.pio/sim/v3-validation-20261005-b/`, con `summary.json`, escenarios, manifiestos, trazas, informes y logs C++. Sus hashes se compararon contra el código probado. Pasaron las 46 pruebas de simulación y cliente de visión, incluidas 7 regresiones de v3: rechazo de v2, veredicto ausente o no booleano, tolerancia del árbitro y obediencia al veredicto aunque las coordenadas indiquen lo contrario. La reproducción exacta cubre 800 pasos.
+
+La ejecución de la seed 42 y dificultad 0,50 con v3 se conserva en `.pio/sim/v3-seed42-20261005-a/`: a 120 s no se asignaron misiones ni hubo entregas. La compatibilidad del contrato no garantiza que la estrategia resuelva todas las distribuciones aleatorias. La validación física sigue pendiente.
+
+Compilación `pio run` correcta para ESP32 con flash de 8 MB. El binario incluye el validador compartido de v3.

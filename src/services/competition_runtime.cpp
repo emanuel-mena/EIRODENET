@@ -74,15 +74,7 @@ static bool delivered(const vision_status_t *v, uint8_t color)
 {
     if (!cube_ready(v, color))
         return false;
-    const float radius = v->cube_side * CUBE_RADIUS_FACTOR;
-    const float x = v->depot_col[color], y = v->depot_row[color];
-    const float top = y, bottom = v->grid_rows - y;
-    const float left = x, right = v->grid_cols - x;
-    const bool horizontal = fminf(top, bottom) < fminf(left, right);
-    const float half_col = (horizontal ? v->depot_length : v->depot_depth) / 2.0f;
-    const float half_row = (horizontal ? v->depot_depth : v->depot_length) / 2.0f;
-    return fabsf(v->cubes[color].col - x) <= half_col - radius &&
-           fabsf(v->cubes[color].row - y) <= half_row - radius;
+    return v->cube_in_depot[color];
 }
 
 static void mark_circle(uint8_t cols, uint8_t rows, float col, float row, float radius)
@@ -298,13 +290,16 @@ static void assign_initial(const vision_status_t *v)
              own.color, other.color);
 }
 
-static void send_remote(void)
+static void send_remote(const vision_status_t *v)
 {
     if (!s_remote_pending || s_remote_ready)
         return;
-    // Keep a single moving mission until route reservations are exchanged.
-    // Acknowledging a route is not permission to occupy a shared push corridor.
-    if (s_local.id && s_phase != EXEC_DONE) return;
+    if (s_local.id && s_phase != EXEC_DONE && s_remote.point_count) {
+        const peer_mission_point_t target = s_remote.points[s_remote.point_count - 1];
+        if (length(target.col - v->col, target.row - v->row) <=
+            2.0f * navigation_peer_clearance())
+            return;
+    }
     peer_comms_status_t peer = {0};
     peer_comms_service_get_status(&peer);
     if (!peer.connected || peer.mode != APP_MODE_COMPETITION)
@@ -339,7 +334,7 @@ static bool cube_in_opening(const vision_status_t *v, uint8_t color)
     const float dy = v->cubes[color].row - v->row;
     const float forward = dx * cosf(radians) - dy * sinf(radians);
     const float lateral = dx * sinf(radians) + dy * cosf(radians);
-    return forward >= 2.0f && forward <= 5.5f && fabsf(lateral) <= 1.5f;
+    return forward >= 2.0f && forward <= 6.0f && fabsf(lateral) <= 1.5f;
 }
 
 static void hold(void)
@@ -724,7 +719,7 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation)
     {
         if (!s_assigned_mask)
             assign_initial(&v);
-        send_remote();
+        send_remote(&v);
         peer_comms_status_t peer = {0};
         peer_comms_service_get_status(&peer);
         const bool own_free = s_phase == EXEC_DONE || (s_phase == EXEC_WAIT && !s_local.id);

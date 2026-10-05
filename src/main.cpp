@@ -45,7 +45,7 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "Servicios del rover: %s", esp_err_to_name(err));
     if (err == ESP_OK) {
         err = vision_service_start();
-        ESP_LOGI(TAG, "Cliente de vision v2: %s", esp_err_to_name(err));
+        ESP_LOGI(TAG, "Cliente de vision v3: %s", esp_err_to_name(err));
         err = navigation_service_start();
         ESP_LOGI(TAG, "Navegacion en core 1: %s", esp_err_to_name(err));
         err = manual_control_service_start();

@@ -133,6 +133,13 @@ class ContractValidator:
     def validate(self, message: Any) -> str | None:
         return self._module.validate_message(message)
 
+    def cube_in_depot(self, cube, depot, grid, depot_size, cube_side, tolerance=0.0):
+        geometry = self._module.geometria_depot(
+            col=depot['col'], row=depot['row'], length=depot_size['length'],
+            depth=depot_size['depth'], cols=grid['cols'], rows=grid['rows'],
+            cube_side=cube_side, tolerance=tolerance)
+        return self._module.cubo_en_depot(col=cube['col'],row=cube['row'],geometria=geometry).adentro
+
 
 class NDJSONDecoder:
     """Reconstruye líneas aunque TCP entregue fragmentos o varias a la vez."""

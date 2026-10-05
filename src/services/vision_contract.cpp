@@ -1,0 +1,168 @@
+#include "vision_contract.hpp"
+#include "vision_service.hpp"
+#include "cJSON.h"
+#include <math.h>
+#include <string.h>
+
+static bool finite_number(const cJSON *item)
+{
+    return cJSON_IsNumber(item) && isfinite(item->valuedouble);
+}
+
+static bool integer_number(const cJSON *item)
+{
+    return finite_number(item) && item->valuedouble == floor(item->valuedouble);
+}
+
+static bool exact_fields(const cJSON *object, const char *const *names, size_t count)
+{
+    if (!cJSON_IsObject(object)) return false;
+    size_t seen = 0;
+    const cJSON *item = NULL;
+    cJSON_ArrayForEach(item, object) {
+        bool known = false;
+        for (size_t i = 0; i < count; ++i) known |= strcmp(item->string, names[i]) == 0;
+        if (!known) return false;
+        ++seen;
+    }
+    if (seen != count) return false;
+    for (size_t i = 0; i < count; ++i) {
+        if (cJSON_GetObjectItemCaseSensitive(object, names[i]) == NULL) return false;
+    }
+    return true;
+}
+
+static bool valid_position_object(const cJSON *object, const char *const *fields,
+                                  size_t field_count, bool with_age)
+{
+    if (!exact_fields(object, fields, field_count)) return false;
+    const cJSON *col = cJSON_GetObjectItemCaseSensitive(object, "col");
+    const cJSON *row = cJSON_GetObjectItemCaseSensitive(object, "row");
+    if (!finite_number(col) || !finite_number(row)) return false;
+    if (with_age) {
+        const cJSON *age = cJSON_GetObjectItemCaseSensitive(object, "age_ms");
+        if (!integer_number(age) || age->valuedouble < 0) return false;
+    }
+    return true;
+}
+
+bool vision_contract_validate(const cJSON *root, const cJSON **own_rover,
+                           uint8_t own_id, uint16_t *cols, uint16_t *rows, float *cell_mm)
+{
+    static const char *const root_fields[] = {"v", "seq", "ts_ms", "phase", "clock", "grid",
+        "rovers", "cubes", "obstacles", "start", "depots", "depot_size", "cube_side"};
+    static const char *const grid_fields[] = {"cols", "rows", "cell_mm"};
+    static const char *const clock_fields[] = {"elapsed_ms", "remaining_ms", "total_ms"};
+    static const char *const rover_fields[] = {"id", "col", "row", "theta", "age_ms"};
+    static const char *const cube_fields[] = {"color", "col", "row", "age_ms", "in_depot"};
+    static const char *const obstacle_fields[] = {"col", "row", "age_ms"};
+    static const char *const start_fields[] = {"col", "row"};
+    static const char *const depot_fields[] = {"color", "col", "row"};
+    static const char *const depot_size_fields[] = {"length", "depth"};
+    if (!exact_fields(root, root_fields, sizeof(root_fields) / sizeof(root_fields[0]))) return false;
+    const cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "v");
+    const cJSON *seq = cJSON_GetObjectItemCaseSensitive(root, "seq");
+    const cJSON *timestamp = cJSON_GetObjectItemCaseSensitive(root, "ts_ms");
+    const cJSON *phase = cJSON_GetObjectItemCaseSensitive(root, "phase");
+    if (!integer_number(version) || version->valueint != VISION_PROTOCOL_VERSION ||
+        !integer_number(seq) || seq->valuedouble < 0 || !integer_number(timestamp) ||
+        timestamp->valuedouble < 0 || !cJSON_IsString(phase) ||
+        (strcmp(phase->valuestring, "IDLE") && strcmp(phase->valuestring, "READY") &&
+         strcmp(phase->valuestring, "RUNNING") && strcmp(phase->valuestring, "FINISHED"))) return false;
+
+    const cJSON *grid = cJSON_GetObjectItemCaseSensitive(root, "grid");
+    if (!exact_fields(grid, grid_fields, 3)) return false;
+    const cJSON *grid_cols = cJSON_GetObjectItemCaseSensitive(grid, "cols");
+    const cJSON *grid_rows = cJSON_GetObjectItemCaseSensitive(grid, "rows");
+    const cJSON *grid_cell = cJSON_GetObjectItemCaseSensitive(grid, "cell_mm");
+    if (!integer_number(grid_cols) || !integer_number(grid_rows) || !finite_number(grid_cell) ||
+        grid_cols->valueint <= 0 || grid_rows->valueint <= 0 || grid_cols->valueint > UINT16_MAX ||
+        grid_rows->valueint > UINT16_MAX || grid_cell->valuedouble <= 0) return false;
+
+    const cJSON *clock = cJSON_GetObjectItemCaseSensitive(root, "clock");
+    if (!exact_fields(clock, clock_fields, 3)) return false;
+    const cJSON *elapsed = cJSON_GetObjectItemCaseSensitive(clock, "elapsed_ms");
+    const cJSON *remaining = cJSON_GetObjectItemCaseSensitive(clock, "remaining_ms");
+    const cJSON *total = cJSON_GetObjectItemCaseSensitive(clock, "total_ms");
+    if (!integer_number(elapsed) || !integer_number(remaining) || !integer_number(total) ||
+        elapsed->valuedouble < 0 || remaining->valuedouble < 0 || total->valuedouble < 0 ||
+        elapsed->valuedouble + remaining->valuedouble != total->valuedouble) return false;
+
+    const cJSON *start = cJSON_GetObjectItemCaseSensitive(root, "start");
+    if (!valid_position_object(start, start_fields, 2, false)) return false;
+    const cJSON *depot_size = cJSON_GetObjectItemCaseSensitive(root, "depot_size");
+    if (!exact_fields(depot_size, depot_size_fields, 2) ||
+        !finite_number(cJSON_GetObjectItemCaseSensitive(depot_size, "length")) ||
+        !finite_number(cJSON_GetObjectItemCaseSensitive(depot_size, "depth")) ||
+        cJSON_GetObjectItemCaseSensitive(depot_size, "length")->valuedouble <= 0 ||
+        cJSON_GetObjectItemCaseSensitive(depot_size, "depth")->valuedouble <= 0) return false;
+    const cJSON *cube_side = cJSON_GetObjectItemCaseSensitive(root, "cube_side");
+    if (!finite_number(cube_side) || cube_side->valuedouble <= 0) return false;
+
+    const cJSON *rovers = cJSON_GetObjectItemCaseSensitive(root, "rovers");
+    const cJSON *cubes = cJSON_GetObjectItemCaseSensitive(root, "cubes");
+    const cJSON *obstacles = cJSON_GetObjectItemCaseSensitive(root, "obstacles");
+    const cJSON *depots = cJSON_GetObjectItemCaseSensitive(root, "depots");
+    if (!cJSON_IsArray(rovers) || !cJSON_IsArray(cubes) || !cJSON_IsArray(obstacles) ||
+        !cJSON_IsArray(depots)) return false;
+    if (cJSON_GetArraySize(rovers) > VISION_MAX_ROVERS ||
+        cJSON_GetArraySize(cubes) > VISION_MAX_CUBES ||
+        cJSON_GetArraySize(depots) > VISION_MAX_CUBES ||
+        cJSON_GetArraySize(obstacles) > VISION_MAX_OBSTACLES) return false;
+    *own_rover = NULL;
+    const cJSON *item = NULL;
+    cJSON_ArrayForEach(item, rovers) {
+        if (!valid_position_object(item, rover_fields, 5, true)) return false;
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "id");
+        const cJSON *theta = cJSON_GetObjectItemCaseSensitive(item, "theta");
+        if (!integer_number(id) || id->valuedouble < 0 || id->valuedouble > UINT8_MAX ||
+            !finite_number(theta) ||
+            theta->valuedouble < 0 || theta->valuedouble > 360) return false;
+        const cJSON *other = rovers->child;
+        while (other != item) {
+            if (cJSON_GetObjectItemCaseSensitive(other, "id")->valuedouble == id->valuedouble)
+                return false;
+            other = other->next;
+        }
+        if (id->valuedouble == own_id) *own_rover = item;
+    }
+    bool depot_colors[3] = {false, false, false};
+    cJSON_ArrayForEach(item, cubes) {
+        if (!valid_position_object(item, cube_fields, 5, true) ||
+            !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(item, "in_depot"))) return false;
+        const cJSON *color = cJSON_GetObjectItemCaseSensitive(item, "color");
+        if (!cJSON_IsString(color) ||
+            (strcmp(color->valuestring, "green") && strcmp(color->valuestring, "blue") &&
+             strcmp(color->valuestring, "red"))) return false;
+        const cJSON *other = cubes->child;
+        while (other != item) {
+            if (strcmp(cJSON_GetObjectItemCaseSensitive(other, "color")->valuestring,
+                       color->valuestring) == 0) return false;
+            other = other->next;
+        }
+    }
+    cJSON_ArrayForEach(item, obstacles) {
+        if (!valid_position_object(item, obstacle_fields, 3, true)) return false;
+    }
+    cJSON_ArrayForEach(item, depots) {
+        if (!valid_position_object(item, depot_fields, 3, false)) return false;
+        const cJSON *color = cJSON_GetObjectItemCaseSensitive(item, "color");
+        if (!cJSON_IsString(color)) return false;
+        int color_index = strcmp(color->valuestring, "green") == 0 ? 0 :
+                          strcmp(color->valuestring, "blue") == 0 ? 1 :
+                          strcmp(color->valuestring, "red") == 0 ? 2 : -1;
+        if (color_index < 0 || depot_colors[color_index]) return false;
+        depot_colors[color_index] = true;
+    }
+    cJSON_ArrayForEach(item, cubes) {
+        const char *color = cJSON_GetObjectItemCaseSensitive(item, "color")->valuestring;
+        const int color_index = strcmp(color, "green") == 0 ? 0 :
+                                strcmp(color, "blue") == 0 ? 1 : 2;
+        if (!depot_colors[color_index]) return false;
+    }
+    *cols = (uint16_t)grid_cols->valueint;
+    *rows = (uint16_t)grid_rows->valueint;
+    *cell_mm = (float)grid_cell->valuedouble;
+    return true;
+}
+

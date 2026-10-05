@@ -67,11 +67,11 @@ class Simulation:
         self.world = World(self.config)
         vc = VisionConfig.from_environment()
         self.validator = ContractValidator(vc.vision_system)
-        if self.validator.version != 2:
-            raise ValueError('El simulador requiere el contrato de visión v2.')
+        if self.validator.version != 3:
+            raise ValueError('El simulador requiere el contrato de visión v3.')
         exe = exe or build()
-        sources = [ROOT/'src/services'/f'{n}.cpp' for n in ('navigation_service','competition_runtime','grid_planner','motion_control')]
-        sources += [vc.vision_system/'contrato/schema.py', exe]
+        sources = [ROOT/'src/services'/f'{n}.cpp' for n in ('navigation_service','competition_runtime','grid_planner','motion_control','vision_contract')]
+        sources += [vc.vision_system/'contrato/schema.py', ROOT/'tools/vision_client/core.py', exe]
         if self.config.get('layout_source'):
             sources.append(Path(self.config['layout_source']))
         sources += sorted((ROOT/'include').glob('*.hpp'))
