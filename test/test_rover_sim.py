@@ -22,8 +22,10 @@ def host_exe():
     return build()
 
 
-def contact_world(offset=0):
+def contact_world(offset=0, motor_strength_difference=None):
     s = scenario()
+    if motor_strength_difference is not None:
+        s['parameters']['motor_strength_difference'] = motor_strength_difference
     s['rovers'][0] = [200,500,0]
     s['cubes'][0] = [277.5,500+offset,0]
     return World(s)
@@ -72,7 +74,7 @@ def test_arm_side_contact_and_turn():
 
 
 def test_in_place_turn_pivots_at_motor_axle():
-    w = contact_world()
+    w = contact_world(motor_strength_difference=0)
     w.cubes[0].position = (700,500)
     b = w.rovers[0]
     axle_start = b.local_to_world((-27.5,0))
@@ -100,6 +102,42 @@ def test_seed_repeatability():
     for _ in range(50):
         a.advance([(700,750),(0,0)]);b.advance([(700,750),(0,0)])
     assert a.snapshot() == b.snapshot()
+
+
+def test_motor_strength_entropy_is_seeded_and_configurable():
+    config = scenario()
+    difference = config['parameters']['motor_strength_difference']
+    a,b = World(config),World(config)
+    assert difference == .04
+    assert a.motor_strengths == b.motor_strengths
+    for left,right in a.motor_strengths:
+        assert sorted((left,right)) == pytest.approx([1-difference/2,1+difference/2])
+
+    config['parameters']['motor_strength_difference'] = 0
+    balanced = World(config)
+    assert balanced.motor_strengths == [(1,1),(1,1)]
+
+
+def test_motor_strength_difference_curves_equal_pwm():
+    imbalanced_config = scenario()
+    imbalanced_config['parameters']['motor_strength_difference'] = .2
+    balanced_config = copy.deepcopy(imbalanced_config)
+    balanced_config['parameters']['motor_strength_difference'] = 0
+    imbalanced,balanced = World(imbalanced_config),World(balanced_config)
+    for world in (imbalanced,balanced):
+        world.cubes[0].position = (700,500)
+        for _ in range(100):
+            world.advance([(500,500),(0,0)])
+    assert abs(imbalanced.rovers[0].angle) > .1
+    assert abs(balanced.rovers[0].angle) < 1e-9
+
+
+@pytest.mark.parametrize('difference',[-.01,1.01,float('nan')])
+def test_motor_strength_difference_rejects_invalid_values(difference):
+    config = scenario()
+    config['parameters']['motor_strength_difference'] = difference
+    with pytest.raises(ValueError):
+        World(config)
 
 
 def test_seed_layout_matches_challenge_page():
@@ -197,6 +235,7 @@ def test_gui_controls_and_reset(tmp_path,host_exe,monkeypatch):
 def test_firmware_diagnostic_and_exact_replay(tmp_path,host_exe):
     # Historical diagnostic fixture, not the official arena layout.
     config = scenario()
+    config['parameters']['vision_entropy'] = False
     config.update(grid=dict(cols=50,rows=50,cell_mm=20.0),origin_mm=[0,0],
                   rovers=[[250,750,90],[750,750,90]],
                   depots=[[250,75],[750,75],[925,500]],start=[500,925])
@@ -213,7 +252,9 @@ def test_firmware_diagnostic_and_exact_replay(tmp_path,host_exe):
 
 @pytest.mark.parametrize('name',['delivery','crossing','vision-loss','peer-loss','delays'])
 def test_real_firmware_completes_deliveries_without_collisions(tmp_path,host_exe,name):
-    sim = Simulation(scenario(name),tmp_path/name,host_exe)
+    config = scenario(name)
+    config['parameters']['vision_entropy'] = False
+    sim = Simulation(config,tmp_path/name,host_exe)
     try:
         for _ in range(12000):
             world = sim.step()
@@ -236,6 +277,7 @@ def test_real_firmware_completes_deliveries_without_collisions(tmp_path,host_exe
 
 def test_seed42_dispatches_and_finishes_without_rover_contact(tmp_path,host_exe):
     config = apply_layout(scenario(),42,.2)
+    config['parameters']['vision_entropy'] = False
     sim = Simulation(config,tmp_path/'seed42-d020',host_exe)
     try:
         for _ in range(12000):
@@ -255,6 +297,7 @@ def test_seed42_dispatches_and_finishes_without_rover_contact(tmp_path,host_exe)
 
 def test_edge_seed_uses_observed_intermediate_push(tmp_path,host_exe):
     config = apply_layout(scenario(),1,1.0)
+    config['parameters']['vision_entropy'] = False
     initial = [cube[:2] for cube in config['cubes']]
     sim = Simulation(config,tmp_path/'seed1-d100',host_exe)
     try:
@@ -380,7 +423,9 @@ def test_firmware_parser_accepts_v3_and_rejects_v2(tmp_path,host_exe):
 
 
 def test_v3_referee_geometry_and_physical_delivery_are_independent():
-    w = World(scenario())
+    config = scenario()
+    config['parameters']['vision_entropy'] = False
+    w = World(config)
     x,row = w.config['depots'][0]
     # A rotated cube physically fits, but its centre exceeds the referee's
     # conservative half-diagonal window, even with the official tolerance.
@@ -396,6 +441,24 @@ def test_v3_referee_geometry_and_physical_delivery_are_independent():
     assert w.frame(3100,3)['cubes'][0]['in_depot'] is True
     w.config['referee_tolerance_mm'] = 0
     assert w.frame(3150,4)['cubes'][0]['in_depot'] is False
+
+
+def test_measured_vision_entropy_repeats_capture_and_is_seeded():
+    config = scenario()
+    assert config['parameters']['vision_entropy'] is True
+    a,b = World(config),World(config)
+    first = a.frame(10,1)
+    assert first == b.frame(10,1)
+    repeated = a.frame(60,2)
+    assert repeated['seq'] == 2
+    assert repeated['ts_ms'] == first['ts_ms']
+    assert repeated['rovers'] == first['rovers']
+    assert repeated['cubes'] == first['cubes']
+    next_capture = a.frame(610,13)
+    assert next_capture == b.frame(610,13)
+    assert next_capture['ts_ms'] == 610
+    assert (next_capture['rovers'],next_capture['cubes']) != (first['rovers'],first['cubes'])
+    assert a.referee.validate(next_capture) is None
 
 
 def test_firmware_obeys_referee_even_when_coordinates_are_outside(tmp_path,host_exe):

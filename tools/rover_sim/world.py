@@ -2,7 +2,9 @@
 import math
 import random
 import json
+import copy
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import pymunk
 from vision_client.core import ContractValidator, VisionConfig
@@ -38,6 +40,7 @@ class Parameters:
     full_speed_mm_s: float = 180.0
     traction_accel_mm_s2: float = 1200.0
     motor_response_s: float = 0.10
+    motor_strength_difference: float = 0.04
     contact_friction: float = 0.5
     cube_floor_deceleration_mm_s2: float = 200.0
     vision_period_ms: int = 50
@@ -45,6 +48,7 @@ class Parameters:
     vision_delay_ms: int = 0
     peer_delay_ms: int = 10
     noise_mm: float = 0.0
+    vision_entropy: bool = True
     substeps: int = 10
 
 
@@ -100,12 +104,16 @@ class World:
         self.start = config.get('start',[500,925])
         self.p = Parameters(**config['parameters'])
         values = asdict(self.p)
-        if not all(isinstance(v,(int,float)) and math.isfinite(v) for v in values.values()):
+        if not all(isinstance(v,(int,float)) and math.isfinite(v) for k,v in values.items() if k!='vision_entropy'):
             raise ValueError('Los parámetros deben ser números finitos.')
+        if type(self.p.vision_entropy) is not bool:
+            raise ValueError('vision_entropy debe ser booleano.')
         if any(values[k]<=0 for k in ('rover_mass','cube_mass','wheel_track_mm','traction_accel_mm_s2','vision_period_ms')):
             raise ValueError('Masa, separación de ruedas, aceleración y período deben ser positivos.')
         if any(values[k]<0 for k in ('vision_delay_ms','peer_delay_ms','noise_mm','contact_friction','cube_floor_deceleration_mm_s2')):
             raise ValueError('Retardos, ruido y fricción no pueden ser negativos.')
+        if not 0 <= self.p.motor_strength_difference <= 1:
+            raise ValueError('La diferencia de fuerza de los motores debe estar entre 0 y 1.')
         if self.p.vision_period_ms % 10 or int(self.p.substeps)!=self.p.substeps:
             raise ValueError('El período debe ser múltiplo de 10 ms y los subpasos enteros.')
         if self.p.ultrasonic_period_ms <= 0 or self.p.ultrasonic_period_ms % 10:
@@ -115,6 +123,18 @@ class World:
         if self.p.substeps < 10 or self.p.full_speed_mm_s <= 0 or self.p.motor_response_s <= 0:
             raise ValueError('Se requieren >=10 subpasos y velocidad/respuesta positivas.')
         self.rng = random.Random(config['seed'])
+        motor_rng = random.Random(config['seed'] ^ 0x4d4f544f)
+        half_difference = self.p.motor_strength_difference/2
+        self.motor_strengths = []
+        for _ in config['rovers']:
+            stronger_left = motor_rng.choice((False, True))
+            self.motor_strengths.append(
+                (1+half_difference, 1-half_difference) if stronger_left else
+                (1-half_difference, 1+half_difference))
+        profile = Path(__file__).with_name('vision_entropy.json')
+        self.vision_entropy = json.loads(profile.read_text(encoding='utf-8')) if self.p.vision_entropy else None
+        self.vision_sample = None
+        self.vision_sample_ms = None
         self.space = pymunk.Space()
         self.space.iterations = 30
         self.space.collision_slop = 0.02
@@ -194,11 +214,15 @@ class World:
     def advance(self, commands):
         self.contacts = []
         # Bound tip displacement below 0.3 mm even if speed estimates are raised.
-        steps = max(self.p.substeps, math.ceil(self.p.full_speed_mm_s * .01 *
+        max_strength = 1+self.p.motor_strength_difference/2
+        steps = max(self.p.substeps, math.ceil(self.p.full_speed_mm_s*max_strength * .01 *
                     (1+205/self.p.wheel_track_mm)/.3))
         dt = .01/steps
         for _ in range(steps):
-            for b, (left,right) in zip(self.rovers, commands):
+            for b, (left,right), (left_strength,right_strength) in zip(
+                    self.rovers, commands, self.motor_strengths):
+                left *= left_strength
+                right *= right_strength
                 v = (left+right)/2000*self.p.full_speed_mm_s
                 w = (right-left)/1000*self.p.full_speed_mm_s/self.p.wheel_track_mm
                 cap = self.p.traction_accel_mm_s2*dt
@@ -256,19 +280,33 @@ class World:
                                          0<=self.to_grid(x,y)[1]<=self.grid['rows']) for x,y in self.polygon(s))])
 
     def frame(self, time_ms, sequence):
+        if (self.vision_entropy and self.vision_sample is not None and
+                time_ms-self.vision_sample_ms < self.vision_entropy['camera_period_ms']):
+            frame = copy.deepcopy(self.vision_sample)
+            frame['seq'] = sequence
+            return frame
         elapsed = max(0,time_ms-3000)
-        def pos(b):
+        residuals = self.rng.choice(self.vision_entropy['residuals']) if self.vision_entropy else {}
+        def pos(b, key):
             x,row,theta = self.pose(b)
             col,row = self.to_grid(x+self.rng.gauss(0,self.p.noise_mm),row+self.rng.gauss(0,self.p.noise_mm))
+            offset = residuals.get(str(key), (0,0))
+            if self.vision_entropy:
+                col,row = round(col+offset[0],3),round(row+offset[1],3)
             return dict(col=col,row=row,age_ms=0)
         depot_size = dict(length=self.depot_size[0]/self.grid['cell_mm'],depth=self.depot_size[1]/self.grid['cell_mm'])
         depots = [dict(color=c,**dict(zip(('col','row'),self.to_grid(x,y)))) for c,(x,y) in zip(COLORS,self.config['depots'])]
-        rovers = [dict(id=10+i,theta=self.pose(b)[2],**pos(b)) for i,b in enumerate(self.rovers)]
-        cubes = [dict(color=COLORS[i],**pos(b)) for i,b in enumerate(self.cubes)]
+        rovers = []
+        for i,b in enumerate(self.rovers):
+            theta = self.pose(b)[2]
+            if self.vision_entropy:
+                theta = round((theta+residuals[str(10+i)][2])%360,2)
+            rovers.append(dict(id=10+i,theta=theta,**pos(b,10+i)))
+        cubes = [dict(color=COLORS[i],**pos(b,COLORS[i])) for i,b in enumerate(self.cubes)]
         for cube,depot in zip(cubes,depots):
             cube['in_depot'] = self.referee.cube_in_depot(cube,depot,self.grid,depot_size,
                 60/self.grid['cell_mm'],self.config.get('referee_tolerance_mm',0)/self.grid['cell_mm'])
-        return dict(v=3, seq=sequence, ts_ms=time_ms,
+        frame = dict(v=3, seq=sequence, ts_ms=time_ms,
                     phase='READY' if time_ms<3000 else 'RUNNING',
                     clock=dict(elapsed_ms=elapsed,remaining_ms=max(0,180000-elapsed),total_ms=max(180000,elapsed)),
                     grid=dict(self.grid), cube_side=60/self.grid['cell_mm'],
@@ -276,5 +314,9 @@ class World:
                     start=dict(zip(('col','row'),self.to_grid(*self.start))),
                     rovers=rovers,
                     cubes=cubes,
-                    obstacles=[pos(b) for b in self.obstacles],
+                    obstacles=[pos(b,None) for b in self.obstacles],
                     depots=depots)
+        if self.vision_entropy:
+            self.vision_sample = copy.deepcopy(frame)
+            self.vision_sample_ms = time_ms
+        return frame

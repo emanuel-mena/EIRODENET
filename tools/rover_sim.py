@@ -15,6 +15,10 @@ def main():
     p.add_argument('--config',type=Path)
     p.add_argument('--seed',type=int,help='Seed del generador de docs/index.html (0 a 4294967295)')
     p.add_argument('--difficulty',type=float,default=.5,help='Dificultad del generador, entre 0 y 1')
+    p.add_argument('--vision-entropy',action=argparse.BooleanOptionalAction,default=None,
+                   help='Activar o desactivar las fluctuaciones y cadencia observadas; activadas por defecto')
+    p.add_argument('--motor-strength-difference',type=float,
+                   help='Diferencia relativa entre motores, de 0 a 1 (predeterminado: 0.04)')
     p.add_argument('--seconds',type=float,default=30)
     p.add_argument('--output',type=Path,default=ROOT/'.pio/sim/run')
     p.add_argument('--replay',type=Path)
@@ -25,6 +29,8 @@ def main():
         p.error('--difficulty debe estar entre 0 y 1')
     if args.seed is not None and not 0 <= args.seed <= 0xffffffff:
         p.error('--seed debe estar entre 0 y 4294967295')
+    if args.motor_strength_difference is not None and not 0 <= args.motor_strength_difference <= 1:
+        p.error('--motor-strength-difference debe estar entre 0 y 1')
     if args.seed is not None and (args.config or args.replay):
         p.error('--seed genera posiciones nuevas; no se combina con --config ni --replay')
     exe = build()
@@ -32,6 +38,10 @@ def main():
         print(f'Replay exacto: {replay(args.replay,exe,args.output)} pasos')
         return
     config = json.loads(args.config.read_text(encoding='utf-8')) if args.config else scenario(args.scenario)
+    if args.vision_entropy is not None:
+        config['parameters']['vision_entropy'] = args.vision_entropy
+    if args.motor_strength_difference is not None:
+        config['parameters']['motor_strength_difference'] = args.motor_strength_difference
     if args.seed is not None:
         apply_layout(config,args.seed,args.difficulty)
     if args.headless:

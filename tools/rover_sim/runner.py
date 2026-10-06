@@ -76,8 +76,11 @@ class Simulation:
             sources.append(Path(self.config['layout_source']))
         sources += sorted((ROOT/'include').glob('*.hpp'))
         sources += sorted(p for p in (ROOT/'tools/rover_sim').rglob('*')
-                          if p.suffix in ('.py','.hpp','.h','.cpp'))
-        manifest = dict(scenario=self.config, sources={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
+                          if p.suffix in ('.py','.hpp','.h','.cpp') or p.name == 'vision_entropy.json')
+        realized = dict(motor_strengths=[dict(left=left,right=right)
+                                         for left,right in self.world.motor_strengths])
+        manifest = dict(scenario=self.config, realized=realized,
+                        sources={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
                         runtime=dict(python=platform.python_version(),system=platform.platform(),pymunk=version('pymunk'),pyside6=version('PySide6')),
                         assumptions='Physical parameters estimated; calibrated sensors; verified competition startup; no radio or camera emulation.')
         (self.output/'scenario.json').write_text(json.dumps(self.config,indent=2),encoding='utf-8')

@@ -116,3 +116,54 @@ en el estado del mundo. Las trazas v2 requieren el controlador anterior para su
 reproducción exacta; los escenarios JSON conservados pueden ejecutarse con v3.
 
 Consulte [ESTRATEGIA.md](ESTRATEGIA.md) para los cambios del firmware, resultados de entrega completa y limitaciones. El ultrasónico simulado actualiza sus muestras cada 200 ms.
+
+## Entropía medida de visión
+
+El 5 de octubre de 2026 se capturaron 200 mensajes válidos del servidor real en
+`127.0.0.1:2026` con todos los objetos inmóviles, mediante
+`python tools/vision_client.py --count 200 --timeout 30 --no-start`. La muestra
+cruda está en `.pio/sim/vision-static-20261005.ndjson`. La secuencia avanzó
+de 4017 a 4216 sin huecos, pero solo hubo 18 valores distintos de `ts_ms` en
+10,101 s: el proceso de cámara produjo una observación aproximadamente cada
+600 ms y el publicador envió el último estado unas 12 veces a 20 Hz. Todos los
+objetos aparecieron en los 18 cuadros con `age_ms=0`.
+
+Las coordenadas salen de las detecciones en píxeles, convertidas a celdas por
+la calibración del tablero. Para cada ArUco, el centro se obtiene cruzando las
+diagonales y el ángulo con el vector entre bordes, corrigiendo luego los
+desfases de montaje del rover. Para cada cubo se ajusta su silueta y se estima
+el centro de la base. El seguimiento conserva la última detección y calcula
+`age_ms` desde el último cuadro en que vio el objeto. El publicador redondea
+`col` y `row` a 0,001 celdas y `theta` a 0,01 grados, y asigna `seq` por
+mensaje, aunque `ts_ms` se repita.
+
+Al contar una sola vez cada `ts_ms`, las desviaciones estándar observadas de
+posición fueron 0,006–0,010 celdas en los rovers, 0,009–0,010 en el cubo
+verde, 0,038/0,014 en col/row del azul y 0,006/0,130 en el rojo. Los ángulos
+de los rovers variaron 0,27 y 0,20 grados. El rojo tuvo dos saltos de row
+cercanos a 0,42 celdas; no se sustituyen por una gaussiana estrecha.
+
+`vision_entropy.json` conserva las 18 muestras conjuntas como diferencias
+respecto a la mediana de cada objeto. Por defecto se selecciona una muestra
+por observación con la seed del escenario, la suma a la pose física, mantiene
+la observación 600 ms y sigue publicando cada 50 ms. Así se conservan saltos y
+correlaciones de esa sesión sin copiar las posiciones absolutas de la cancha.
+`scenario.json` registra el parámetro y `manifest.json` incluye el hash del
+perfil. `--no-vision-entropy` permite repetir diagnósticos históricos sin este
+efecto; una copia del escenario puede fijar `parameters.vision_entropy=false`.
+
+```powershell
+& .pio/sim-venv/Scripts/python.exe tools/rover_sim.py --headless --scenario delivery --seconds 120 --output .pio/sim/delivery-vision-entropy
+```
+
+La muestra estacionaria no mide error sistemático frente a la posición real,
+desenfoque por movimiento ni oclusiones. Las fluctuaciones del perfil son una
+prueba de estrés observada, no una calibración absoluta de la cámara.
+## Entropía de los motores
+
+`parameters.motor_strength_difference` expresa la diferencia relativa entre
+los dos motores de cada rover y vale `0.04` por defecto. Para cada rover y
+semilla se elige de forma reproducible cuál motor es más fuerte, con factores
+centrados en uno: `0.04` produce `1.02` y `0.98`. Puede cambiarse en un JSON de
+escenario o con `--motor-strength-difference`; `0` desactiva el efecto. Los
+factores efectivos quedan registrados en `manifest.json`.
