@@ -77,7 +77,9 @@ typedef struct {
 
 typedef struct {
     bool valid;
+    bool direct;
     uint8_t grid_cols, grid_rows;
+    int8_t origin_col, origin_row;
     float cell_mm;
     uint16_t segment_count, segment_index;
     route_segment_t segments[NAV_MAX_SEGMENTS];
@@ -159,6 +161,7 @@ static float direction_heading(uint8_t index)
 static int coordinate_cell(float coordinate, uint8_t dimension)
 {
     int cell = (int)floorf(coordinate);
+    if (s_competition_target) return cell;
     if (cell < 0) cell = 0;
     if (cell >= dimension) cell = dimension - 1;
     return cell;
@@ -363,38 +366,41 @@ static esp_err_t build_occupancy(const vision_status_t *vision)
     if (vision->grid_cols == 0 || vision->grid_rows == 0 ||
         vision->grid_cols > GRID_PLANNER_MAX_DIM || vision->grid_rows > GRID_PLANNER_MAX_DIM)
         return ESP_ERR_INVALID_SIZE;
-    const uint8_t cols = (uint8_t)vision->grid_cols;
-    const uint8_t rows = (uint8_t)vision->grid_rows;
+    const int origin_col = s_competition_target ?
+        navigation_planner_origin(vision->grid_cols, vision->cell_mm) : 0;
+    const int origin_row = s_competition_target ?
+        navigation_planner_origin(vision->grid_rows, vision->cell_mm) : 0;
+    const int width = vision->grid_cols + 2 * origin_col;
+    const int height = vision->grid_rows + 2 * origin_row;
+    if (width > (int)GRID_PLANNER_MAX_DIM || height > (int)GRID_PLANNER_MAX_DIM)
+        return ESP_ERR_INVALID_SIZE;
+    const uint8_t cols = (uint8_t)width;
+    const uint8_t rows = (uint8_t)height;
     memset(s_occupancy, 0, (size_t)cols * rows);
-    if (s_competition_target) {
-        for (uint8_t r = 0; r < rows; ++r)
-            for (uint8_t c = 0; c < cols; ++c)
-                if (c + 0.5f < NAV_BODY_TURN_RADIUS_CELLS || r + 0.5f < NAV_BODY_TURN_RADIUS_CELLS ||
-                    c + 0.5f > cols - NAV_BODY_TURN_RADIUS_CELLS || r + 0.5f > rows - NAV_BODY_TURN_RADIUS_CELLS)
-                    s_occupancy[r * cols + c] = 1;
-    }
     for (uint8_t i = 0; i < vision->obstacle_count; ++i) {
         const vision_position_t *obstacle = &vision->obstacles[i];
         if (obstacle->age_ms > VISION_FRESH_MS) continue;
-        mark_occupied(cols, rows, obstacle->col, obstacle->row,
-                      navigation_square_clearance(NAV_OBSTACLE_SIDE_CELLS));
+        mark_occupied(cols, rows, obstacle->col + origin_col, obstacle->row + origin_row,
+                      NAV_OBSTACLE_SIDE_CELLS * 0.7071067812f + 1.0f);
     }
     if (vision->peer_valid && vision->peer_age_ms <= VISION_FRESH_MS) {
         peer_comms_status_t peer = {};
         peer_comms_service_get_status(&peer);
         // A free peer only needs its physical footprint. Reserve the larger
         // route corridor while it is executing or its state is unavailable.
-        mark_occupied(cols, rows, vision->peer_col, vision->peer_row,
-                      peer.competition_available ? navigation_peer_clearance() :
-                      NAV_PEER_ROUTE_CLEARANCE_CELLS);
+        mark_occupied(cols, rows, vision->peer_col + origin_col, vision->peer_row + origin_row,
+                      s_competition_target ? NAV_ROVER_WIDTH_CELLS / 2 + 1.0f :
+                      (peer.competition_available ? navigation_peer_clearance() :
+                       NAV_PEER_ROUTE_CLEARANCE_CELLS));
     }
     if (s_competition_target) {
         for (uint8_t i = 0; i < VISION_MAX_CUBES; ++i) {
             if ((i == s_competition_cube && s_competition_contact) ||
                 !vision->cube_valid[i] ||
                 vision->cubes[i].age_ms > VISION_FRESH_MS) continue;
-            mark_occupied(cols, rows, vision->cubes[i].col, vision->cubes[i].row,
-                          navigation_square_clearance(vision->cube_side));
+            mark_occupied(cols, rows, vision->cubes[i].col + origin_col,
+                          vision->cubes[i].row + origin_row,
+                          vision->cube_side * 0.7071067812f + 1.0f);
         }
     }
     return ESP_OK;
@@ -408,29 +414,36 @@ static esp_err_t append_segment(float start_col, float start_row, float end_col,
     const uint8_t heading = direction_index(delta_col, delta_row);
     bool reverse = false;
     if (s_competition_target) {
-        const float cols = s_route.grid_cols, rows = s_route.grid_rows;
+        const float cols = s_route.grid_cols - 2 * s_route.origin_col;
+        const float rows = s_route.grid_rows - 2 * s_route.origin_row;
         const float angle = direction_heading(heading);
         bool forward = navigation_pose_inside_mm(start_col, start_row, angle, cols, rows,
                                                  s_route.cell_mm) &&
             navigation_pose_inside_mm(end_col, end_row, angle, cols, rows, s_route.cell_mm);
-        // Reverse before reaching the edge, while there is still room to turn
-        // the asymmetric arms (including arrival and braking tolerances).
-        const float turn_margin = 7.2f;
-        if ((delta_col > 0 && end_col > cols - turn_margin) ||
-            (delta_col < 0 && end_col < turn_margin) ||
-            (delta_row > 0 && end_row > rows - turn_margin) ||
-            (delta_row < 0 && end_row < turn_margin)) forward = false;
         const bool backward = navigation_pose_inside_mm(start_col, start_row, angle + 180, cols, rows,
                                                         s_route.cell_mm) &&
             navigation_pose_inside_mm(end_col, end_row, angle + 180, cols, rows, s_route.cell_mm);
-        if (!forward && !backward) {
+        const route_segment_t *previous = s_route.segment_count ?
+            &s_route.segments[s_route.segment_count - 1] : NULL;
+        const float current_heading = previous ?
+            direction_heading(previous->heading_index) + (previous->reverse ? 180.0f : 0.0f) :
+            s_estimator.theta_deg;
+        forward = forward && navigation_turn_inside_mm(start_col, start_row,
+            current_heading, angle_error(angle, current_heading), cols, rows,
+            s_route.cell_mm);
+        const bool reverse_safe = backward && navigation_turn_inside_mm(start_col, start_row,
+            current_heading, angle_error(angle + 180.0f, current_heading), cols, rows,
+            s_route.cell_mm);
+        if (!forward && !reverse_safe) {
             if (hypotf(end_col - start_col, end_row - start_row) < 2.0f)
                 return ESP_ERR_NOT_FOUND;
             const float mid_col = (start_col + end_col) / 2, mid_row = (start_row + end_row) / 2;
             esp_err_t err = append_segment(start_col, start_row, mid_col, mid_row);
             return err == ESP_OK ? append_segment(mid_col, mid_row, end_col, end_row) : err;
         }
-        reverse = !forward;
+        reverse = reverse_safe && (!forward ||
+            fabsf(angle_error(angle + 180.0f, current_heading)) <
+            fabsf(angle_error(angle, current_heading)));
     }
     if (s_route.segment_count > 0) {
         route_segment_t *previous = &s_route.segments[s_route.segment_count - 1];
@@ -490,6 +503,25 @@ static void publish_current_segment(void)
     s_status.waypoint_row = segment->end_row;
 }
 
+static bool navigation_scene_clear(const vision_status_t *vision,
+                                   float col, float row, float heading)
+{
+    for (uint8_t i = 0; i < vision->obstacle_count; ++i)
+        if (vision->obstacles[i].age_ms <= VISION_FRESH_MS &&
+            !navigation_rover_clear_of_square(col, row, heading,
+                vision->obstacles[i].col, vision->obstacles[i].row,
+                NAV_OBSTACLE_SIDE_CELLS)) return false;
+    for (uint8_t i = 0; i < VISION_MAX_CUBES; ++i)
+        if (vision->cube_valid[i] && vision->cubes[i].age_ms <= VISION_FRESH_MS &&
+            !(i == s_competition_cube && s_competition_contact) &&
+            !navigation_rover_clear_of_square(col, row, heading,
+                vision->cubes[i].col, vision->cubes[i].row,
+                vision->cube_side)) return false;
+    return !vision->peer_valid ||
+        !navigation_rovers_overlap(col, row, heading, vision->peer_col,
+                                   vision->peer_row, vision->peer_theta_deg);
+}
+
 static bool route_geometry_valid_locked(const vision_status_t *vision,
                                         uint16_t *bad_cell, bool *bad_pivot)
 {
@@ -539,6 +571,41 @@ static bool route_geometry_valid_locked(const vision_status_t *vision,
             if (bad_pivot) *bad_pivot = false;
             return false;
         }
+        if (s_competition_target) {
+            float axle_col, axle_row;
+            navigation_axle_from_center(turn_col, turn_row, previous_heading,
+                                        s_route.cell_mm, &axle_col, &axle_row);
+            const int turn_steps = (int)ceilf(fabsf(turn_error) / NAV_SWEEP_SAMPLE_DEG) + 1;
+            const int travel_steps = (int)ceilf(hypotf(
+                segment->end_col - segment->start_col,
+                segment->end_row - segment->start_row) / 0.5f) + 1;
+            bool clear = true;
+            for (int sample = 0; sample <= turn_steps && clear; ++sample) {
+                const float sampled_heading = previous_heading +
+                    turn_error * sample / turn_steps;
+                float sampled_col, sampled_row;
+                navigation_center_from_axle(axle_col, axle_row, sampled_heading,
+                    s_route.cell_mm, &sampled_col, &sampled_row);
+                clear = navigation_scene_clear(vision, sampled_col, sampled_row,
+                                               sampled_heading);
+            }
+            for (int sample = 0; sample <= travel_steps && clear; ++sample) {
+                const float t = (float)sample / travel_steps;
+                clear = navigation_scene_clear(vision,
+                    segment->start_col + t * (segment->end_col - segment->start_col),
+                    segment->start_row + t * (segment->end_row - segment->start_row),
+                    heading);
+            }
+            if (!clear) {
+                if (bad_cell) {
+                    const uint16_t cell_index = i + 1U < s_route.cells.count ? i + 1U : i;
+                    *bad_cell = s_route.cells.cells[cell_index].row * s_route.grid_cols +
+                        s_route.cells.cells[cell_index].col;
+                }
+                if (bad_pivot) *bad_pivot = false;
+                return false;
+            }
+        }
         previous_heading = heading;
     }
     return true;
@@ -551,33 +618,41 @@ static bool try_initial_escape_locked(const vision_status_t *vision,
     const float escape_heading = roundf(s_estimator.theta_deg / 45.0f) * 45.0f;
     const float radians = escape_heading * (float)M_PI / 180.0f;
     const float step_col = cosf(radians), step_row = -sinf(radians);
-    const uint8_t cols = (uint8_t)vision->grid_cols;
-    const uint8_t rows = (uint8_t)vision->grid_rows;
+    const uint8_t cols = s_route.grid_cols;
+    const uint8_t rows = s_route.grid_rows;
     for (uint8_t half_steps = 1; half_steps <= 8; ++half_steps) {
         const float distance = 0.5f * half_steps;
         const float candidate_col = s_estimator.col + distance * step_col;
         const float candidate_row = s_estimator.row + distance * step_row;
         const bool segment_safe = navigation_segment_inside_mm(
             s_estimator.col, s_estimator.row, candidate_col, candidate_row,
-            escape_heading, cols, rows, s_route.cell_mm);
+            escape_heading, vision->grid_cols, vision->grid_rows, s_route.cell_mm);
         bool turn_safe = navigation_turn_inside_mm(
             candidate_col, candidate_row, escape_heading,
-            angle_error(target_heading, escape_heading), cols, rows, s_route.cell_mm);
+            angle_error(target_heading, escape_heading), vision->grid_cols,
+            vision->grid_rows, s_route.cell_mm);
         const float turn_margin = fminf(distance, ARRIVAL_CELLS + 0.25f);
         const float early_col = candidate_col - turn_margin * step_col;
         const float early_row = candidate_row - turn_margin * step_row;
         turn_safe = turn_safe && navigation_turn_inside_mm(
             early_col, early_row, escape_heading,
-            angle_error(target_heading, escape_heading), cols, rows, s_route.cell_mm);
+            angle_error(target_heading, escape_heading), vision->grid_cols,
+            vision->grid_rows, s_route.cell_mm);
         if (!segment_safe || !turn_safe) continue;
         bool occupied = false;
         const int sample_count = (int)ceilf(distance / 0.25f);
         for (int sample = 1; sample <= sample_count; ++sample) {
             const float fraction = (float)sample / sample_count;
             const int cell_col = coordinate_cell(s_estimator.col +
-                fraction * distance * step_col, cols);
+                fraction * distance * step_col, (uint8_t)vision->grid_cols) +
+                s_route.origin_col;
             const int cell_row = coordinate_cell(s_estimator.row +
-                fraction * distance * step_row, rows);
+                fraction * distance * step_row, (uint8_t)vision->grid_rows) +
+                s_route.origin_row;
+            if (cell_col < 0 || cell_col >= cols || cell_row < 0 || cell_row >= rows) {
+                occupied = true;
+                break;
+            }
             if (s_occupancy[cell_row * cols + cell_col]) {
                 occupied = true;
                 break;
@@ -597,20 +672,37 @@ static bool try_initial_escape_locked(const vision_status_t *vision,
 
 static esp_err_t plan_route_locked(const vision_status_t *vision, bool replanning)
 {
-    const uint8_t cols = (uint8_t)vision->grid_cols;
-    const uint8_t rows = (uint8_t)vision->grid_rows;
+    const int origin_col = s_competition_target ?
+        navigation_planner_origin(vision->grid_cols, vision->cell_mm) : 0;
+    const int origin_row = s_competition_target ?
+        navigation_planner_origin(vision->grid_rows, vision->cell_mm) : 0;
+    const int width = vision->grid_cols + 2 * origin_col;
+    const int height = vision->grid_rows + 2 * origin_row;
+    if (width > (int)GRID_PLANNER_MAX_DIM || height > (int)GRID_PLANNER_MAX_DIM)
+        return ESP_ERR_INVALID_SIZE;
+    const uint8_t cols = (uint8_t)width;
+    const uint8_t rows = (uint8_t)height;
+    const int start_col = s_confirmed_cell_valid ? s_status.confirmed_cell_col :
+        coordinate_cell(s_estimator.col, (uint8_t)vision->grid_cols);
+    const int start_row = s_confirmed_cell_valid ? s_status.confirmed_cell_row :
+        coordinate_cell(s_estimator.row, (uint8_t)vision->grid_rows);
+    const int goal_col = coordinate_cell(s_status.col, (uint8_t)vision->grid_cols);
+    const int goal_row = coordinate_cell(s_status.row, (uint8_t)vision->grid_rows);
+    if (start_col + origin_col < 0 || start_col + origin_col >= cols ||
+        start_row + origin_row < 0 || start_row + origin_row >= rows ||
+        goal_col + origin_col < 0 || goal_col + origin_col >= cols ||
+        goal_row + origin_row < 0 || goal_row + origin_row >= rows)
+        return ESP_ERR_INVALID_ARG;
     const grid_planner_cell_t start = {
-        .col = (uint8_t)(s_confirmed_cell_valid
-            ? s_status.confirmed_cell_col : coordinate_cell(s_estimator.col, cols)),
-        .row = (uint8_t)(s_confirmed_cell_valid
-            ? s_status.confirmed_cell_row : coordinate_cell(s_estimator.row, rows)),
+        .col = (uint8_t)(start_col + origin_col),
+        .row = (uint8_t)(start_row + origin_row),
     };
     const grid_planner_cell_t goal = {
-        .col = (uint8_t)coordinate_cell(s_status.col, cols),
-        .row = (uint8_t)coordinate_cell(s_status.row, rows),
+        .col = (uint8_t)(goal_col + origin_col),
+        .row = (uint8_t)(goal_row + origin_row),
     };
-    const float lattice_offset_col = s_estimator.col - start.col;
-    const float lattice_offset_row = s_estimator.row - start.row;
+    const float lattice_offset_col = s_estimator.col - start_col;
+    const float lattice_offset_row = s_estimator.row - start_row;
     memset(s_route_forbidden, 0, sizeof(s_route_forbidden));
     s_planning_failure_reason = NAVIGATION_FAILURE_NO_ROUTE;
     esp_err_t err = ESP_ERR_NOT_FOUND;
@@ -625,7 +717,30 @@ static esp_err_t plan_route_locked(const vision_status_t *vision, bool replannin
         memset(&s_route, 0, sizeof(s_route));
         s_route.grid_cols = cols;
         s_route.grid_rows = rows;
+        s_route.origin_col = (int8_t)origin_col;
+        s_route.origin_row = (int8_t)origin_row;
         s_route.cell_mm = navigation_cell_mm(vision->cell_mm);
+        if (s_competition_target && attempt == 0) {
+            s_route.cells.count = 2;
+            s_route.cells.cells[0] = start;
+            s_route.cells.cells[1] = goal;
+            if (append_queen_move(s_estimator.col, s_estimator.row,
+                                  s_status.col, s_status.row) == ESP_OK &&
+                route_geometry_valid_locked(vision, NULL, NULL)) {
+                planned = true;
+                s_route.direct = true;
+                err = ESP_OK;
+                ESP_LOGI(TAG, "Ruta directa validada hacia %.2f, %.2f",
+                         (double)s_status.col, (double)s_status.row);
+                break;
+            }
+            memset(&s_route, 0, sizeof(s_route));
+            s_route.grid_cols = cols;
+            s_route.grid_rows = rows;
+            s_route.origin_col = (int8_t)origin_col;
+            s_route.origin_row = (int8_t)origin_row;
+            s_route.cell_mm = navigation_cell_mm(vision->cell_mm);
+        }
         err = grid_planner_plan(cols, rows, s_occupancy, start, goal, &s_route.cells);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Ruta candidata %u rechazada: sin camino desde (%u,%u) hacia (%u,%u)",
@@ -635,15 +750,16 @@ static esp_err_t plan_route_locked(const vision_status_t *vision, bool replannin
         float cursor_col = s_estimator.col;
         float cursor_row = s_estimator.row;
         const float first_col = s_route.cells.count > 1
-            ? s_route.cells.cells[1].col + lattice_offset_col : cursor_col;
+            ? s_route.cells.cells[1].col - origin_col + lattice_offset_col : cursor_col;
         const float first_row = s_route.cells.count > 1
-            ? s_route.cells.cells[1].row + lattice_offset_row : cursor_row;
+            ? s_route.cells.cells[1].row - origin_row + lattice_offset_row : cursor_row;
         if (s_route.cells.count > 1) {
             const float first_heading = direction_heading(direction_index(
                 sign_float(first_col - cursor_col), sign_float(first_row - cursor_row)));
             if (!navigation_turn_inside_mm(cursor_col, cursor_row, s_estimator.theta_deg,
                                            angle_error(first_heading, s_estimator.theta_deg),
-                                           cols, rows, s_route.cell_mm)) {
+                                           vision->grid_cols, vision->grid_rows,
+                                           s_route.cell_mm)) {
                 if (try_initial_escape_locked(vision, first_heading, &cursor_col, &cursor_row)) {
                     err = append_segment(s_estimator.col, s_estimator.row, cursor_col, cursor_row);
                 } else {
@@ -658,8 +774,8 @@ static esp_err_t plan_route_locked(const vision_status_t *vision, bool replannin
             } else err = ESP_OK;
         }
         for (uint16_t i = 1; err == ESP_OK && i < s_route.cells.count; ++i) {
-            const float next_col = s_route.cells.cells[i].col + lattice_offset_col;
-            const float next_row = s_route.cells.cells[i].row + lattice_offset_row;
+            const float next_col = s_route.cells.cells[i].col - origin_col + lattice_offset_col;
+            const float next_row = s_route.cells.cells[i].row - origin_row + lattice_offset_row;
             err = append_segment(cursor_col, cursor_row, next_col, next_row);
             cursor_col = next_col;
             cursor_row = next_row;
@@ -704,8 +820,8 @@ static esp_err_t plan_route_locked(const vision_status_t *vision, bool replannin
     }
     s_route.valid = true;
     s_route.occupancy_frame_timestamp_ms = vision->frame_timestamp_ms;
-    s_status.confirmed_cell_col = start.col;
-    s_status.confirmed_cell_row = start.row;
+    s_status.confirmed_cell_col = (int16_t)start_col;
+    s_status.confirmed_cell_row = (int16_t)start_row;
     s_confirmed_cell_valid = true;
     s_confirmed_pattern = s_stable_pattern;
     s_status.wait_reason = NAVIGATION_WAIT_NONE;
@@ -728,8 +844,23 @@ static esp_err_t plan_route_locked(const vision_status_t *vision, bool replannin
 
 static bool remaining_route_blocked(const vision_status_t *vision)
 {
+    if (s_route.valid && s_route.direct && s_competition_target) {
+        if (s_route.segment_index >= s_route.segment_count) return false;
+        const route_segment_t *segment = &s_route.segments[s_route.segment_index];
+        const float dx = segment->end_col - s_estimator.col;
+        const float dy = segment->end_row - s_estimator.row;
+        const float length = hypotf(dx, dy);
+        if (length < 0.001f) return false;
+        const float heading = direction_heading(segment->heading_index) +
+            (segment->reverse ? 180.0f : 0.0f);
+        for (float distance = 0; distance <= fminf(length, 2.0f); distance += 0.5f)
+            if (!navigation_scene_clear(vision,
+                s_estimator.col + distance * dx / length,
+                s_estimator.row + distance * dy / length, heading)) return true;
+        return false;
+    }
     if (!s_route.valid || build_occupancy(vision) != ESP_OK) return false;
-    const uint8_t cols = (uint8_t)vision->grid_cols;
+    const uint8_t cols = s_route.grid_cols;
     for (uint16_t i = s_route.cell_index + 1; i < s_route.cells.count; ++i) {
         const grid_planner_cell_t cell = s_route.cells.cells[i];
         if (s_occupancy[cell.row * cols + cell.col]) return true;
@@ -751,8 +882,8 @@ static void update_confirmed_cell(const vision_status_t *vision, bool new_vision
         if (!s_status.has_target || !s_route.valid) return;
         for (uint16_t i = s_route.cell_index; i < s_route.cells.count; ++i) {
             const grid_planner_cell_t cell = s_route.cells.cells[i];
-            if (cell.col == s_status.confirmed_cell_col &&
-                cell.row == s_status.confirmed_cell_row) {
+            if ((int)cell.col - s_route.origin_col == s_status.confirmed_cell_col &&
+                (int)cell.row - s_route.origin_row == s_status.confirmed_cell_row) {
                 s_route.cell_index = i;
                 break;
             }
@@ -787,7 +918,8 @@ static void update_confirmed_cell(const vision_status_t *vision, bool new_vision
     s_confirmed_pattern = s_stable_pattern;
     if (s_route.cell_index + 1 < s_route.cells.count) {
         const grid_planner_cell_t next = s_route.cells.cells[s_route.cell_index + 1];
-        if (next.col == candidate_col && next.row == candidate_row) ++s_route.cell_index;
+        if ((int)next.col - s_route.origin_col == candidate_col &&
+            (int)next.row - s_route.origin_row == candidate_row) ++s_route.cell_index;
     }
 }
 
@@ -939,6 +1071,12 @@ static void update_controller(const rover_imu_state_t *imu, const rover_sensor_s
             !sensors->infrared_valid ? NAVIGATION_FAILURE_INFRARED :
             NAVIGATION_FAILURE_UNCERTAINTY;
         finish_locked(NAVIGATION_ERROR, ESP_ERR_INVALID_RESPONSE);
+        return;
+    }
+    if (s_competition_target && !vision->pose_valid &&
+        (s_estimator.col < 0 || s_estimator.row < 0 ||
+         s_estimator.col >= vision->grid_cols || s_estimator.row >= vision->grid_rows)) {
+        wait_for_vision_locked(NAVIGATION_WAIT_VISION_LIMIT);
         return;
     }
     const bool new_ultrasonic_sample = sensors->timestamp_ms != s_ultrasonic_sample_ms;
@@ -1362,7 +1500,13 @@ static esp_err_t navigation_service_submit_internal(float col, float row,
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
-    if (col < 0 || row < 0 || col >= vision.grid_cols || row >= vision.grid_rows) {
+    const float margin_col = competition ?
+        navigation_workspace_margin_cells(vision.grid_cols, vision.cell_mm) : 0.0f;
+    const float margin_row = competition ?
+        navigation_workspace_margin_cells(vision.grid_rows, vision.cell_mm) : 0.0f;
+    if (col < -margin_col || row < -margin_row ||
+        col >= vision.grid_cols + margin_col ||
+        row >= vision.grid_rows + margin_row) {
         xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_ARG;
     }

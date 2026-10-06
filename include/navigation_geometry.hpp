@@ -13,10 +13,25 @@
 #define NAV_MOTOR_AXLE_OFFSET_MM (-27.5f)
 #define NAV_DEFAULT_CELL_MM 20.0f
 #define NAV_SWEEP_SAMPLE_DEG 3.0f
+#ifndef NAV_WORKSPACE_SIDE_MM
+#define NAV_WORKSPACE_SIDE_MM 1000.0f
+#endif
 
 static inline float navigation_cell_mm(float cell_mm)
 {
     return isfinite(cell_mm) && cell_mm > 0.0f ? cell_mm : NAV_DEFAULT_CELL_MM;
+}
+
+/** The game grid is centred on a traversable mat; its border is not a wall. */
+static inline float navigation_workspace_margin_cells(float cells, float cell_mm)
+{
+    return fmaxf(0.0f, (NAV_WORKSPACE_SIDE_MM / navigation_cell_mm(cell_mm) - cells) * 0.5f);
+}
+
+/** Integer offset for a grid planner whose cells cannot be negative. */
+static inline int navigation_planner_origin(float cells, float cell_mm)
+{
+    return (int)ceilf(navigation_workspace_margin_cells(cells, cell_mm));
 }
 
 /** Offset of the motor axle from the body centre in grid cells. */
@@ -50,12 +65,15 @@ static inline bool navigation_pose_inside_mm(float col, float row, float heading
                                              float cols, float rows, float cell_mm)
 {
     const float a = heading * 0.01745329252f;
+    const float margin_col = navigation_workspace_margin_cells(cols, cell_mm);
+    const float margin_row = navigation_workspace_margin_cells(rows, cell_mm);
     for (int i = 0; i < 4; ++i) {
         const float x = i & 1 ? NAV_FRONT_EXTENT_CELLS : -NAV_BODY_HALF_LENGTH_CELLS;
         const float y = i & 2 ? NAV_ROVER_WIDTH_CELLS / 2 : -NAV_ROVER_WIDTH_CELLS / 2;
         const float c = col + x * cosf(a) - y * sinf(a);
         const float r = row - x * sinf(a) - y * cosf(a);
-        if (c < 0 || r < 0 || c > cols || r > rows) return false;
+        if (c < -margin_col || r < -margin_row ||
+            c > cols + margin_col || r > rows + margin_row) return false;
     }
     return true;
 }
@@ -145,6 +163,23 @@ static inline float navigation_body_swept_radius(void)
 static inline float navigation_square_clearance(float side)
 {
     return navigation_body_swept_radius() + side * 0.7071067812f + NAV_CLEARANCE_CELLS;
+}
+
+/** Exact rover envelope against a circumscribed square (unknown square yaw). */
+static inline bool navigation_rover_clear_of_square(float col, float row, float heading,
+                                                    float square_col, float square_row,
+                                                    float square_side)
+{
+    const float a = heading * 0.01745329252f;
+    const float dx = square_col - col, dy = square_row - row;
+    const float longitudinal = dx * cosf(a) - dy * sinf(a);
+    const float lateral = dx * sinf(a) + dy * cosf(a);
+    const float nearest_long = fmaxf(-NAV_BODY_HALF_LENGTH_CELLS,
+                                    fminf(NAV_FRONT_EXTENT_CELLS, longitudinal));
+    const float nearest_lat = fmaxf(-NAV_ROVER_WIDTH_CELLS / 2,
+                                   fminf(NAV_ROVER_WIDTH_CELLS / 2, lateral));
+    return hypotf(longitudinal - nearest_long, lateral - nearest_lat) >
+           square_side * 0.7071067812f + 0.1f;
 }
 
 static inline float navigation_peer_clearance(void)
