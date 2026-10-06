@@ -38,6 +38,7 @@ function roverCard(id) {
         <div><small>IR atrás</small><strong data-sensor="ir-rear">— / —</strong></div>
         <div><small>Color R/G/B</small><strong data-sensor="color">— / — / —</strong></div>
       </div></section>
+      <section class="tinyml"><p class="section-label">POLÍTICA TINYML</p><strong class="tinyml-state">Esperando modelo</strong><div class="tinyml-details"><span data-tinyml="identity">EIRM —</span><span data-tinyml="tensor">Tensor —</span><span data-tinyml="arena">Arena —</span><span data-tinyml="latency">Latencia —</span></div></section>
       <section class="controls"><div><p class="section-label">CONTROL DIRECTO</p><div class="dpad">
         <button data-drive="forward" aria-label="Avanzar">↑</button><button data-drive="left" aria-label="Girar izquierda">←</button><button data-drive="stop" class="stop" aria-label="Detener">■</button><button data-drive="right" aria-label="Girar derecha">→</button><button data-drive="back" aria-label="Retroceder">↓</button>
       </div><small class="hint">Mantén presionado · parada automática en 500 ms</small></div>
@@ -55,7 +56,8 @@ const rovers = new Map()
 for (const id of roverIds) {
   const element = document.querySelector(`#rover-${id}`)
   const state = { id, element, base: null, online: false, busy: false, diagBusy: false,
-    mode: null, visionRecent: false, visionExpiresAt: 0, driveTimer: null, logEntries: readStoredLogs(id),
+    mode: null, visionRecent: false, visionExpiresAt: 0, modelAvailable: false,
+    modelVersion: 0, modelCrc32: 0, driveTimer: null, logEntries: readStoredLogs(id),
     bootId: null, resetReason: null, renderError: null, lastData: null,
     trackedRequestId: null, notifiedNavPhase: null }
   state.orientation = makeOrientation(element.querySelector('.arrow'), id)
@@ -82,6 +84,8 @@ function currentCompetitionGate() {
   return competitionEligibility([...rovers.values()].map(rover => ({
     id: rover.id, online: rover.online, mode: rover.mode,
     visionRecent: rover.visionRecent && now < rover.visionExpiresAt,
+    modelAvailable: rover.modelAvailable, modelVersion: rover.modelVersion,
+    modelCrc32: rover.modelCrc32,
   })))
 }
 
@@ -131,7 +135,7 @@ function makeOrientation(container, id) {
 
 function setOnline(rover, online, label = online ? 'En línea' : 'Sin conexión') {
   if (!online && rover.online) clearTelemetry(rover)
-  if (!online) { rover.mode = null; rover.visionRecent = false; rover.visionExpiresAt = 0 }
+  if (!online) { rover.mode = null; rover.visionRecent = false; rover.visionExpiresAt = 0; rover.modelAvailable = false; rover.modelVersion = 0; rover.modelCrc32 = 0 }
   rover.online = online; rover.element.dataset.online = String(online)
   rover.element.querySelector('fieldset').disabled = !online
   rover.element.querySelector('.connection span').textContent = label
@@ -144,6 +148,8 @@ function clearTelemetry(rover) {
   e.querySelector('.mode-pill').textContent = '—'; e.querySelector('.ip').textContent = 'Sin IP'; e.querySelector('.rssi').textContent = '— dBm'
   e.querySelector('.imu-angle').textContent = '— °'; e.querySelector('.temperature').textContent = '— °C'; e.querySelector('.imu-state').textContent = 'Esperando lectura'
   setText(e, 'distance', '—'); setText(e, 'ir-front', '— / —'); setText(e, 'ir-rear', '— / —'); setText(e, 'color', '— / — / —')
+  e.querySelector('.tinyml-state').textContent = 'Esperando modelo'
+  for (const key of ['identity', 'tensor', 'arena', 'latency']) e.querySelector(`[data-tinyml="${key}"]`).textContent = `${key} —`
   for (const key of ['pose', 'speed', 'vision', 'grid']) e.querySelector(`[data-nav="${key}"]`).textContent = `${key} —`
   rover.orientation.quaternion.identity()
 }
@@ -200,6 +206,15 @@ function updateRover(rover, data) {
   setText(e, 'ir-front', data.sensors.infrared.valid ? `${data.sensors.infrared.front_left} / ${data.sensors.infrared.front_right}` : `error ${data.sensors.infrared.error ?? '—'}`)
   setText(e, 'ir-rear', data.sensors.infrared.valid ? `${data.sensors.infrared.rear_left} / ${data.sensors.infrared.rear_right}` : '— / —')
   setText(e, 'color', data.sensors.color.valid ? `${data.sensors.color.red} / ${data.sensors.color.green} / ${data.sensors.color.blue}` : `error ${data.sensors.color.error ?? '—'}`)
+  const model = data.tinyml || {}
+  rover.modelAvailable = model.available === true
+  rover.modelVersion = Number(model.version || 0)
+  rover.modelCrc32 = Number(model.crc32 || 0)
+  e.querySelector('.tinyml-state').textContent = model.available ? 'Modelo disponible' : `Autonomía bloqueada · error ${model.error ?? '—'}`
+  e.querySelector('[data-tinyml="identity"]').textContent = `EIRM v${model.version || '—'} · ${model.length || 0} B · CRC ${Number(model.crc32 || 0).toString(16).padStart(8, '0')}`
+  e.querySelector('[data-tinyml="tensor"]').textContent = model.input_count ? `int8 [1,${model.input_count}] → [1,${model.output_count}]` : 'Tensor no informado'
+  e.querySelector('[data-tinyml="arena"]').textContent = model.arena_bytes ? `Arena ${model.arena_used_bytes || 0}/${model.arena_bytes} B · heap mín. ${model.minimum_free_heap_bytes || 0} B` : 'Arena no informada'
+  e.querySelector('[data-tinyml="latency"]').textContent = Number.isFinite(model.latency_us) ? `Latencia ${model.latency_us} µs · ${model.inference_count || 0} inferencias` : 'Latencia no informada'
   e.querySelectorAll('.controls button, .controls input').forEach(control => { control.disabled = competition })
   const nav = data.navigation; const pose = nav.pose || {}; const vision = nav.vision || {}; const grid = nav.grid_encoder || {}; const route = nav.route || {}
   const navMessage = navigationMessage(data)

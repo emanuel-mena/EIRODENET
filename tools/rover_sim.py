@@ -5,7 +5,7 @@ from pathlib import Path
 from rover_sim.build import ROOT, build
 from rover_sim.runner import Simulation, replay
 from rover_sim.world import SCENARIOS, scenario
-from rover_sim.layout import apply_layout
+from rover_sim.layout import apply_domain_randomization, apply_layout
 
 
 def main():
@@ -22,6 +22,11 @@ def main():
     p.add_argument('--seconds',type=float,default=30)
     p.add_argument('--output',type=Path,default=ROOT/'.pio/sim/run')
     p.add_argument('--replay',type=Path)
+    p.add_argument('--model',type=Path,help='Modelo TFLite int8 [1,68] -> [1,2]')
+    p.add_argument('--domain-randomization',action='store_true',
+                   help='Muestrear física, retardos y sensores de forma reproducible')
+    p.add_argument('--randomization-seed',type=int,
+                   help='Seed de dominio; usa la seed del escenario si se omite')
     args = p.parse_args()
     if args.seconds <= 0:
         p.error('--seconds debe ser positivo')
@@ -35,7 +40,7 @@ def main():
         p.error('--seed genera posiciones nuevas; no se combina con --config ni --replay')
     exe = build()
     if args.replay:
-        print(f'Replay exacto: {replay(args.replay,exe,args.output)} pasos')
+        print(f'Replay exacto: {replay(args.replay,exe,args.output,args.model)} pasos')
         return
     config = json.loads(args.config.read_text(encoding='utf-8')) if args.config else scenario(args.scenario)
     if args.vision_entropy is not None:
@@ -44,8 +49,11 @@ def main():
         config['parameters']['motor_strength_difference'] = args.motor_strength_difference
     if args.seed is not None:
         apply_layout(config,args.seed,args.difficulty)
+    if args.domain_randomization:
+        apply_domain_randomization(config,args.randomization_seed
+                                   if args.randomization_seed is not None else config['seed'])
     if args.headless:
-        sim = Simulation(config,args.output,exe)
+        sim = Simulation(config,args.output,exe,model=args.model)
         try:
             for _ in range(round(args.seconds*100)):
                 sim.step()
@@ -55,7 +63,7 @@ def main():
                               delivered=sim.world.delivered(),phases=[s['phase'] for s in sim.status])))
     else:
         from rover_sim.gui import run
-        run(config,args.output,exe)
+        run(config,args.output,exe,args.model)
 
 
 if __name__=='__main__':

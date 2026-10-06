@@ -14,7 +14,18 @@ export function competitionEligibility(states) {
       reason: `Rover ${rover.id} no recibe tramas válidas recientes del servidor`,
     }
   }
-  return { enabled: true, reason: 'Ambos rovers listos · datos del servidor recientes' }
+  for (const rover of states) {
+    if (!rover.modelAvailable) return {
+      enabled: false,
+      reason: `Rover ${rover.id} no tiene una política TinyML válida`,
+    }
+  }
+  if (states.some(rover => rover.modelVersion !== states[0].modelVersion ||
+      rover.modelCrc32 !== states[0].modelCrc32)) return {
+    enabled: false,
+    reason: 'Los rovers tienen versiones o CRC de modelo distintos',
+  }
+  return { enabled: true, reason: 'Ambos rovers listos · modelo TinyML coincidente' }
 }
 
 export function formatPoseSpeed(pose) {

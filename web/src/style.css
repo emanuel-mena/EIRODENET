@@ -25,6 +25,9 @@ h1 em { color: #ffff00; font-style: normal; }
 .competition-panel .kicker { color: #000080; }
 .competition-panel h2 { margin: 0; font: bold 1.3rem 'Courier New', monospace; }
 #competition-status { margin: 7px 0 0; font: .72rem/1.4 'Courier New', monospace; }
+.tinyml { margin-top: 10px; }
+.tinyml-state { display: block; margin: 5px 0; }
+.tinyml-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; font: .68rem/1.35 'Courier New', monospace; }
 #competition-enter { flex: none; min-height: 44px; padding: 10px 16px; border: 3px solid; border-color: #fff #333 #333 #fff; background: #fff06a; color: #08083e; box-shadow: inset 1px 1px #fff; cursor: pointer; font: bold .8rem 'Courier New', monospace; }
 #competition-enter:active { border-color: #333 #fff #fff #333; transform: translate(1px, 1px); }
 .rovers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; align-items: start; }

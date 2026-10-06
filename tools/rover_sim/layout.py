@@ -105,3 +105,33 @@ def apply_layout(config, seed, difficulty=.5):
     config['seed'] = seed
     config['challenge_layout'] = dict(seed=seed,difficulty=difficulty,cubes=layout,algorithm='mulberry32-v1')
     return config
+
+
+def apply_domain_randomization(config, seed):
+    """Muestrea física y sensores dentro de los límites declarados para entrenamiento."""
+    import random
+    rng = random.Random(seed ^ 0x444f4d41)
+    p = config['parameters']
+    def scale(name, spread):
+        p[name] *= rng.uniform(1-spread,1+spread)
+    for name in ('rover_mass','cube_mass','full_speed_mm_s','traction_accel_mm_s2','motor_response_s'):
+        scale(name,.10)
+    for name in ('contact_friction','cube_floor_deceleration_mm_s2'):
+        scale(name,.20)
+    p.update(motor_strength_difference=rng.uniform(0,.08),
+             vision_delay_ms=rng.randint(0,250),peer_delay_ms=rng.randint(10,250),
+             infrared_noise_fraction=rng.uniform(0,.08),gyro_noise_dps=rng.uniform(0,.6),
+             ultrasonic_noise_mm=rng.uniform(0,6))
+    config['domain_randomization'] = dict(seed=seed,algorithm='eiro-domain-v1')
+    return config
+
+
+def apply_seeded_entropy(config, seed, difficulty=.5):
+    """Aplica con una sola seed posiciones físicas y variaciones del dominio."""
+    apply_layout(config, seed, difficulty)
+    apply_domain_randomization(config, seed)
+    config['seeded_entropy'] = dict(
+        seed=seed, difficulty=difficulty,
+        layout_algorithm=config['challenge_layout']['algorithm'],
+        domain_algorithm=config['domain_randomization']['algorithm'])
+    return config

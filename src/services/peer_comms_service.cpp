@@ -19,9 +19,10 @@
 #include "navigation_service.hpp"
 #include "rover_service.hpp"
 #include "vision_service.hpp"
+#include "tinyml_policy.hpp"
 
 #define PEER_MAGIC 0x524f4952U
-#define PEER_PROTOCOL_VERSION 8U
+#define PEER_PROTOCOL_VERSION 9U
 #define PEER_STATE_PERIOD_MS 200U
 #define PEER_TIMEOUT_MS 1500U
 
@@ -33,8 +34,8 @@ typedef enum {
     PEER_MESSAGE_LINK_REPLY = 5,
     PEER_MESSAGE_IDENTITY_REQUEST = 6,
     PEER_MESSAGE_IDENTITY_REPLY = 7,
-    PEER_MESSAGE_MISSION = 8,
-    PEER_MESSAGE_MISSION_ACK = 9,
+    PEER_MESSAGE_ASSIGNMENT = 8,
+    PEER_MESSAGE_ASSIGNMENT_ACK = 9,
     PEER_MESSAGE_COMPETITION_ENTER = 10,
     PEER_MESSAGE_COMPETITION_ACK = 11,
     PEER_MESSAGE_LOG = 12,
@@ -84,6 +85,12 @@ typedef struct {
     uint16_t vision_frame_age_ms;
     uint32_t boot_id;
     uint8_t reset_reason;
+    uint32_t assignment_id;
+    uint32_t model_version;
+    uint32_t model_crc32;
+    uint8_t assignment_color;
+    uint8_t assignment_result;
+    uint8_t assignment_phase;
 } peer_state_payload_t;
 
 typedef struct {
@@ -98,12 +105,8 @@ typedef struct {
         struct { float col; float row; uint32_t nonce; } target;
         struct { uint32_t nonce, request_id; int32_t error; } target_ack;
         struct { uint32_t nonce; uint8_t identity; } verification;
-        struct {
-            uint32_t id;
-            uint8_t color, fragment, fragments, count;
-            peer_mission_point_t points[PEER_MISSION_FRAGMENT_POINTS];
-        } mission;
-        struct { uint32_t id; uint8_t fragment, accepted; } mission_ack;
+        struct { uint32_t id; uint8_t color; } assignment;
+        struct { uint32_t id; uint8_t accepted; } assignment_ack;
         struct { uint32_t nonce; uint8_t accepted, reason; } mode;
         diagnostic_entry_t log;
         struct { uint32_t boot_id, sequence; } log_ack;
@@ -126,10 +129,8 @@ static uint32_t s_sequence;
 static int64_t s_last_seen_ms;
 static uint32_t s_link_nonce;
 static uint32_t s_identity_nonce;
-static peer_mission_t s_mission;
-static uint8_t s_mission_fragments;
-static uint8_t s_mission_next_fragment;
-static bool s_mission_complete;
+static peer_assignment_t s_assignment;
+static bool s_assignment_complete;
 static uint32_t s_last_mode_nonce;
 static uint32_t s_last_target_nonce;
 static uint32_t s_last_target_request_id;
@@ -206,7 +207,8 @@ static void send_local_state(void)
                    (sensors.infrared_valid ? 8U : 0U) |
                    (sensors.color_valid ? 16U : 0U) |
                    (navigation.has_target ? 32U : 0U) |
-                   (navigation.vision_heading_calibrated ? 64U : 0U);
+                   (navigation.vision_heading_calibrated ? 64U : 0U) |
+                   (tinyml_policy_ready() ? 128U : 0U);
     state->rssi = wifi.rssi;
     state->navigation_phase = (uint8_t)navigation.phase;
     state->temperature_c = imu.sample.temperature_c;
@@ -252,6 +254,16 @@ static void send_local_state(void)
     state->vision_frame_age_ms = frame_age > UINT16_MAX ? UINT16_MAX : (uint16_t)frame_age;
     state->boot_id = diagnostics_boot_id();
     state->reset_reason = (uint8_t)diagnostics_reset_reason();
+    competition_assignment_status_t assignment = {};
+    competition_runtime_get_assignment_status(&assignment);
+    tinyml_policy_status_t model = {};
+    tinyml_policy_get_status(&model);
+    state->assignment_id = assignment.id;
+    state->assignment_color = assignment.color;
+    state->assignment_result = assignment.result;
+    state->assignment_phase = assignment.phase;
+    state->model_version = model.version;
+    state->model_crc32 = model.crc32;
     send_packet(&packet);
 }
 
@@ -316,6 +328,13 @@ static void accept_state(const peer_packet_t *packet)
     s_status.vision_frame_age_ms = state->vision_frame_age_ms;
     s_status.boot_id = state->boot_id;
     s_status.reset_reason = state->reset_reason;
+    s_status.assignment_id = state->assignment_id;
+    s_status.assignment_color = state->assignment_color;
+    s_status.assignment_result = state->assignment_result;
+    s_status.assignment_phase = state->assignment_phase;
+    s_status.model_available = (state->flags & 128U) != 0;
+    s_status.model_version = state->model_version;
+    s_status.model_crc32 = state->model_crc32;
     s_last_seen_ms = esp_timer_get_time() / 1000;
     s_status.connected = true;
     s_status.last_error = ESP_OK;
@@ -407,68 +426,37 @@ static void handle_received(const received_packet_t *received)
         send_packet(&reply);
         return;
     }
-    if (received->packet.type == PEER_MESSAGE_MISSION_ACK) {
+    if (received->packet.type == PEER_MESSAGE_ASSIGNMENT_ACK) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        s_status.mission_ack_id = received->packet.payload.mission_ack.id;
-        s_status.mission_ack_fragment = received->packet.payload.mission_ack.fragment;
-        s_status.mission_ack_accepted = received->packet.payload.mission_ack.accepted != 0;
+        s_status.assignment_ack_id = received->packet.payload.assignment_ack.id;
+        s_status.assignment_ack_accepted = received->packet.payload.assignment_ack.accepted != 0;
         xSemaphoreGive(s_lock);
         return;
     }
-    if (received->packet.type == PEER_MESSAGE_MISSION) {
-        const decltype(received->packet.payload.mission) *fragment = &received->packet.payload.mission;
+    if (received->packet.type == PEER_MESSAGE_ASSIGNMENT) {
+        const peer_assignment_t assignment = {
+            .id = received->packet.payload.assignment.id,
+            .color = received->packet.payload.assignment.color,
+            .retry = 0,
+        };
         vision_status_t vision = {0};
         vision_service_get_status(&vision);
         bool accepted = app_mode_get() == APP_MODE_COMPETITION &&
             (vision.phase == VISION_PHASE_READY || vision.phase == VISION_PHASE_RUNNING) &&
             vision.connected && vision.protocol_valid && vision.received_ms != 0 &&
             (uint64_t)(esp_timer_get_time() / 1000) - vision.last_valid_frame_ms <= 750 &&
-            fragment->id != 0 && fragment->color < VISION_MAX_CUBES &&
-            fragment->fragments > 0 && fragment->fragments <=
-                PEER_MISSION_MAX_POINTS / PEER_MISSION_FRAGMENT_POINTS &&
-            fragment->fragment < fragment->fragments && fragment->count > 0 &&
-            fragment->count <= PEER_MISSION_FRAGMENT_POINTS;
-        if (accepted) {
-            for (uint8_t i = 0; i < fragment->count; ++i) {
-                const peer_mission_point_t *p = &fragment->points[i];
-                if (!isfinite(p->col) || !isfinite(p->row) || p->col < 0 || p->row < 0 ||
-                    p->col >= vision.grid_cols || p->row >= vision.grid_rows) accepted = false;
-            }
-        }
+            assignment.id != 0 && assignment.color < VISION_MAX_CUBES;
         if (accepted) {
             xSemaphoreTake(s_lock, portMAX_DELAY);
-            if (fragment->fragment == 0 && s_mission.id != fragment->id) {
-                memset(&s_mission, 0, sizeof(s_mission));
-                s_mission.id = fragment->id;
-                s_mission.color = fragment->color;
-                s_mission_fragments = fragment->fragments;
-                s_mission_next_fragment = 0;
-                s_mission_complete = false;
-            }
-            if (s_mission.id != fragment->id || s_mission.color != fragment->color ||
-                s_mission_fragments != fragment->fragments ||
-                (fragment->fragment != s_mission_next_fragment &&
-                 !(s_mission_next_fragment > 0 && fragment->fragment == s_mission_next_fragment - 1))) {
-                accepted = false;
-            } else if (fragment->fragment == s_mission_next_fragment) {
-                const uint8_t offset = fragment->fragment * PEER_MISSION_FRAGMENT_POINTS;
-                if (offset + fragment->count > PEER_MISSION_MAX_POINTS ||
-                    (fragment->fragment + 1 < fragment->fragments &&
-                     fragment->count != PEER_MISSION_FRAGMENT_POINTS)) accepted = false;
-                else {
-                    memcpy(&s_mission.points[offset], fragment->points,
-                           fragment->count * sizeof(peer_mission_point_t));
-                    s_mission.point_count = offset + fragment->count;
-                    ++s_mission_next_fragment;
-                    s_mission_complete = s_mission_next_fragment == s_mission_fragments;
-                }
-            }
+            if (!s_assignment_complete || s_assignment.id != assignment.id)
+                s_assignment = assignment;
+            else if (s_assignment.color != assignment.color) accepted = false;
+            s_assignment_complete = accepted;
             xSemaphoreGive(s_lock);
         }
-        peer_packet_t reply = {.type = PEER_MESSAGE_MISSION_ACK};
-        reply.payload.mission_ack.id = fragment->id;
-        reply.payload.mission_ack.fragment = fragment->fragment;
-        reply.payload.mission_ack.accepted = accepted;
+        peer_packet_t reply = {.type = PEER_MESSAGE_ASSIGNMENT_ACK};
+        reply.payload.assignment_ack.id = assignment.id;
+        reply.payload.assignment_ack.accepted = accepted;
         send_packet(&reply);
         return;
     }
@@ -678,33 +666,23 @@ esp_err_t peer_comms_service_request_competition(uint8_t *reason)
     return ESP_ERR_TIMEOUT;
 }
 
-esp_err_t peer_comms_service_send_mission_fragment(const peer_mission_t *mission, uint8_t fragment)
+esp_err_t peer_comms_service_send_assignment(const peer_assignment_t *assignment)
 {
-    if (mission == NULL || mission->point_count == 0 ||
-        mission->point_count > PEER_MISSION_MAX_POINTS || mission->color >= VISION_MAX_CUBES ||
+    if (assignment == NULL || assignment->id == 0 ||
+        assignment->color >= VISION_MAX_CUBES || assignment->retry > 1 ||
         app_mode_get() != APP_MODE_COMPETITION) return ESP_ERR_INVALID_ARG;
-    const uint8_t fragments = (mission->point_count + PEER_MISSION_FRAGMENT_POINTS - 1) /
-        PEER_MISSION_FRAGMENT_POINTS;
-    if (fragment >= fragments) return ESP_ERR_INVALID_ARG;
-    peer_packet_t packet = {.type = PEER_MESSAGE_MISSION};
-    packet.payload.mission.id = mission->id;
-    packet.payload.mission.color = mission->color;
-    packet.payload.mission.fragment = fragment;
-    packet.payload.mission.fragments = fragments;
-    const uint8_t offset = fragment * PEER_MISSION_FRAGMENT_POINTS;
-    packet.payload.mission.count = mission->point_count - offset < PEER_MISSION_FRAGMENT_POINTS
-        ? mission->point_count - offset : PEER_MISSION_FRAGMENT_POINTS;
-    memcpy(packet.payload.mission.points, &mission->points[offset],
-           packet.payload.mission.count * sizeof(peer_mission_point_t));
+    peer_packet_t packet = {.type = PEER_MESSAGE_ASSIGNMENT};
+    packet.payload.assignment.id = assignment->id;
+    packet.payload.assignment.color = assignment->color;
     return send_packet(&packet);
 }
 
-bool peer_comms_service_get_mission(peer_mission_t *mission)
+bool peer_comms_service_get_assignment(peer_assignment_t *assignment)
 {
-    if (mission == NULL || s_lock == NULL) return false;
+    if (assignment == NULL || s_lock == NULL) return false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    const bool complete = s_mission_complete;
-    if (complete) *mission = s_mission;
+    const bool complete = s_assignment_complete;
+    if (complete) *assignment = s_assignment;
     xSemaphoreGive(s_lock);
     return complete;
 }
@@ -718,13 +696,10 @@ void peer_comms_service_reset_verification(void)
     s_status.verified_identity = 0;
     s_link_nonce = 0;
     s_identity_nonce = 0;
-    memset(&s_mission, 0, sizeof(s_mission));
-    s_mission_fragments = 0;
-    s_mission_next_fragment = 0;
-    s_mission_complete = false;
-    s_status.mission_ack_id = 0;
-    s_status.mission_ack_fragment = 0;
-    s_status.mission_ack_accepted = false;
+    memset(&s_assignment, 0, sizeof(s_assignment));
+    s_assignment_complete = false;
+    s_status.assignment_ack_id = 0;
+    s_status.assignment_ack_accepted = false;
     s_status.vision_heading_offset_deg = 0.0f;
     s_status.vision_heading_calibrated = false;
     xSemaphoreGive(s_lock);

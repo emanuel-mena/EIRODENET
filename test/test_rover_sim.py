@@ -1,6 +1,7 @@
 import copy
 import json
 import math
+import os
 import sys
 import re
 import shutil
@@ -20,6 +21,17 @@ from vision_client.core import VisionConfig
 @pytest.fixture(scope='session')
 def host_exe():
     return build()
+
+
+@pytest.fixture
+def tinyml_model():
+    value = os.environ.get('TINYML_TEST_MODEL')
+    if not value:
+        pytest.skip('Defina TINYML_TEST_MODEL con un candidato int8 para las pruebas de movimiento.')
+    path = Path(value).resolve()
+    if not path.is_file():
+        pytest.fail(f'TINYML_TEST_MODEL no existe: {path}')
+    return path
 
 
 def contact_world(offset=0, motor_strength_difference=None):
@@ -232,14 +244,14 @@ def test_gui_controls_and_reset(tmp_path,host_exe,monkeypatch):
     assert all(c.p.poll() is not None for c in w.sim.controllers)
 
 
-def test_firmware_diagnostic_and_exact_replay(tmp_path,host_exe):
+def test_firmware_diagnostic_and_exact_replay(tmp_path,host_exe,tinyml_model):
     # Historical diagnostic fixture, not the official arena layout.
     config = scenario()
     config['parameters']['vision_entropy'] = False
     config.update(grid=dict(cols=50,rows=50,cell_mm=20.0),origin_mm=[0,0],
                   rovers=[[250,750,90],[750,750,90]],
                   depots=[[250,75],[750,75],[925,500]],start=[500,925])
-    sim = Simulation(config,tmp_path/'run',host_exe)
+    sim = Simulation(config,tmp_path/'run',host_exe,model=tinyml_model)
     try:
         assert sim.controllers[0].p.pid != sim.controllers[1].p.pid
         for _ in range(800):sim.step()
@@ -247,14 +259,14 @@ def test_firmware_diagnostic_and_exact_replay(tmp_path,host_exe):
         assert sim.world.snapshot()['rovers'] != config['rovers']
     finally:
         sim.close()
-    assert replay(tmp_path/'run/trace.ndjson',host_exe,tmp_path/'replay') == 800
+    assert replay(tmp_path/'run/trace.ndjson',host_exe,tmp_path/'replay',tinyml_model) == 800
 
 
 @pytest.mark.parametrize('name',['delivery','crossing','vision-loss','peer-loss','delays'])
-def test_real_firmware_completes_deliveries_without_collisions(tmp_path,host_exe,name):
+def test_real_firmware_completes_deliveries_without_collisions(tmp_path,host_exe,tinyml_model,name):
     config = scenario(name)
     config['parameters']['vision_entropy'] = False
-    sim = Simulation(config,tmp_path/name,host_exe)
+    sim = Simulation(config,tmp_path/name,host_exe,model=tinyml_model)
     try:
         for _ in range(12000):
             world = sim.step()
@@ -275,10 +287,10 @@ def test_real_firmware_completes_deliveries_without_collisions(tmp_path,host_exe
         sim.close()
 
 
-def test_seed42_dispatches_and_finishes_without_rover_contact(tmp_path,host_exe):
+def test_seed42_dispatches_and_finishes_without_rover_contact(tmp_path,host_exe,tinyml_model):
     config = apply_layout(scenario(),42,.2)
     config['parameters']['vision_entropy'] = False
-    sim = Simulation(config,tmp_path/'seed42-d020',host_exe)
+    sim = Simulation(config,tmp_path/'seed42-d020',host_exe,model=tinyml_model)
     try:
         for _ in range(12000):
             world = sim.step()
@@ -295,11 +307,11 @@ def test_seed42_dispatches_and_finishes_without_rover_contact(tmp_path,host_exe)
         sim.close()
 
 
-def test_edge_seed_uses_observed_intermediate_push(tmp_path,host_exe):
+def test_edge_seed_uses_observed_intermediate_push(tmp_path,host_exe,tinyml_model):
     config = apply_layout(scenario(),1,1.0)
     config['parameters']['vision_entropy'] = False
     initial = [cube[:2] for cube in config['cubes']]
-    sim = Simulation(config,tmp_path/'seed1-d100',host_exe)
+    sim = Simulation(config,tmp_path/'seed1-d100',host_exe,model=tinyml_model)
     try:
         for _ in range(8000):
             world = sim.step()

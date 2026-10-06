@@ -1,0 +1,3 @@
+-r requirements-sim.txt
+-r requirements-tinyml.txt
+pyserial==3.5

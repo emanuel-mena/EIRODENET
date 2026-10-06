@@ -14,13 +14,62 @@ from .build import ROOT, build
 from .world import World
 
 
+class TFLitePolicy:
+    """Intérprete de entrenamiento para el contrato int8 [1,68] -> [1,2]."""
+    def __init__(self, model):
+        try:
+            import numpy as np
+            import tensorflow as tf
+        except ImportError as exc:
+            raise RuntimeError('Instale tools/requirements-tinyml.txt para usar --model.') from exc
+        if Path(model).read_bytes()[4:8] != b'TFL3':
+            raise ValueError('El modelo no contiene la firma FlatBuffer TFL3.')
+        self.np = np
+        self.interpreter = tf.lite.Interpreter(
+            model_path=str(model), num_threads=1,
+            experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF)
+        self.interpreter.allocate_tensors()
+        inputs, outputs = self.interpreter.get_input_details(), self.interpreter.get_output_details()
+        if len(inputs) != 1 or len(outputs) != 1 or tuple(inputs[0]['shape']) != (1,68) or tuple(outputs[0]['shape']) != (1,2):
+            raise ValueError('El modelo debe tener tensores [1,68] y [1,2].')
+        if inputs[0]['dtype'] != np.int8 or outputs[0]['dtype'] != np.int8:
+            raise ValueError('El modelo debe estar cuantizado completamente a int8.')
+        operations = self.interpreter._get_ops_details()
+        if [op['op_name'] for op in operations] != [
+                'FULLY_CONNECTED','FULLY_CONNECTED','FULLY_CONNECTED','TANH']:
+            raise ValueError('La arquitectura debe ser Dense(64)-Dense(64)-Dense(2,tanh).')
+        tensors = {item['index']:item for item in self.interpreter.get_tensor_details()}
+        widths = [tuple(tensors[op['outputs'][0]]['shape']) for op in operations[:3]]
+        if widths != [(1,64),(1,64),(1,2)]:
+            raise ValueError('Las capas densas deben producir 64, 64 y 2 valores.')
+        self.input, self.output = inputs[0], outputs[0]
+
+    def __call__(self, observation):
+        np = self.np
+        scale, zero = self.input['quantization']
+        if not scale:
+            raise ValueError('La entrada int8 no tiene parámetros de cuantización.')
+        values = np.clip(np.rint(np.asarray(observation, dtype=np.float32)/scale + zero),-128,127).astype(np.int8)[None,:]
+        self.interpreter.set_tensor(self.input['index'], values)
+        self.interpreter.invoke()
+        quantized = self.interpreter.get_tensor(self.output['index'])[0]
+        out_scale, out_zero = self.output['quantization']
+        if not out_scale:
+            raise ValueError('La salida int8 no tiene parámetros de cuantización.')
+        action = np.clip((quantized.astype(np.float32)-out_zero)*out_scale,-1,1)
+        return action.tolist(), values[0].tolist(), quantized.tolist()
+
+
 class Controller:
-    def __init__(self, exe, identity, log):
+    def __init__(self, exe, identity, log, model=None):
         self.stderr = log.open('w', encoding='utf-8')
         env = dict(os.environ)
         if os.name == 'nt':
             env['PATH'] = str(Path(os.environ.get('CXX', 'C:/msys64/ucrt64/bin/g++.exe')).parent) + os.pathsep + env['PATH']
-        self.p = subprocess.Popen([str(exe),str(identity)], stdin=subprocess.PIPE,
+        command = [str(exe),str(identity)] + (['--policy-rpc'] if model else [])
+        self.policy = TFLitePolicy(model) if model else None
+        self.last_inferences = []
+        self.p = subprocess.Popen(command, stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=self.stderr,
                                   text=True, encoding='utf-8', env=env,
                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
@@ -33,15 +82,27 @@ class Controller:
         self.reader.start()
 
     def step(self, data):
+        self.last_inferences = []
         self.p.stdin.write(json.dumps(data,separators=(',',':'))+'\n')
         self.p.stdin.flush()
-        try:
-            line = self.lines.get(timeout=5)
-        except queue.Empty as exc:
-            raise RuntimeError('El controlador no respondió en 5 segundos.') from exc
-        if line is None:
-            raise RuntimeError(f'El controlador terminó: {self.p.poll()}; consulte el registro C++.')
-        response = json.loads(line)
+        while True:
+            try:
+                line = self.lines.get(timeout=5)
+            except queue.Empty as exc:
+                raise RuntimeError('El controlador no respondió en 5 segundos.') from exc
+            if line is None:
+                raise RuntimeError(f'El controlador terminó: {self.p.poll()}; consulte el registro C++.')
+            response = json.loads(line)
+            if response.get('type') != 'inference':
+                break
+            if self.policy is None:
+                raise RuntimeError('El controlador solicitó inferencia sin un modelo.')
+            action, quantized_input, quantized_output = self.policy(response['observation'])
+            self.last_inferences.append(dict(observation=response['observation'],
+                                             input_int8=quantized_input,
+                                             output_int8=quantized_output,action=action))
+            self.p.stdin.write(json.dumps(dict(action=action),separators=(',',':'))+'\n')
+            self.p.stdin.flush()
         if response['step'] != data['step']:
             raise RuntimeError('Respuesta de controlador fuera de secuencia.')
         return response
@@ -60,7 +121,7 @@ class Controller:
 
 
 class Simulation:
-    def __init__(self, config, output, exe=None):
+    def __init__(self, config, output, exe=None, model=None):
         self.config = copy.deepcopy(config)
         self.output = Path(output)
         self.output.mkdir(parents=True, exist_ok=True)
@@ -70,7 +131,7 @@ class Simulation:
         if self.validator.version != 3:
             raise ValueError('El simulador requiere el contrato de visión v3.')
         exe = exe or build()
-        sources = [ROOT/'src/services'/f'{n}.cpp' for n in ('navigation_service','competition_runtime','grid_planner','motion_control','vision_contract')]
+        sources = [ROOT/'src/services'/f'{n}.cpp' for n in ('navigation_service','competition_runtime','tinyml_policy','grid_planner','motion_control','vision_contract')]
         sources += [vc.vision_system/'contrato/schema.py', ROOT/'tools/vision_client/core.py', exe]
         if self.config.get('layout_source'):
             sources.append(Path(self.config['layout_source']))
@@ -79,6 +140,10 @@ class Simulation:
                           if p.suffix in ('.py','.hpp','.h','.cpp') or p.name == 'vision_entropy.json')
         realized = dict(motor_strengths=[dict(left=left,right=right)
                                          for left,right in self.world.motor_strengths])
+        model_path = Path(model) if model else None
+        if model_path:
+            realized['model'] = dict(path=str(model_path),sha256=hashlib.sha256(model_path.read_bytes()).hexdigest())
+        self.model_sha256 = realized.get('model',{}).get('sha256')
         manifest = dict(scenario=self.config, realized=realized,
                         sources={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources},
                         runtime=dict(python=platform.python_version(),system=platform.platform(),pymunk=version('pymunk'),pyside6=version('PySide6')),
@@ -88,7 +153,7 @@ class Simulation:
         self.controllers = []
         try:
             for identity in (10,11):
-                self.controllers.append(Controller(exe,identity,self.output/f'rover-{identity}.log'))
+                self.controllers.append(Controller(exe,identity,self.output/f'rover-{identity}.log',model_path))
         except Exception:
             self.close()
             raise
@@ -96,11 +161,19 @@ class Simulation:
         self.step_id = 0
         self.vision_queue = []
         self.peer_queue = [[],[]]
-        self.status = [dict(available=True,delivered=0,ack={},messages=[],phase=0,left=0,right=0,route=[]) for _ in range(2)]
+        self.status = [dict(available=True,delivered=0,ack={},messages=[],phase=0,left=0,right=0,
+                            model_available=bool(model_path),route=[]) for _ in range(2)]
         self.acks = [{},{}]
         self.events = []
         self.previous = None
+        self.metrics = dict(simultaneous_motion_ms=0,yields=0,effective_yields=0,reassignments=0,
+                            blocked_mask=0,
+                            recovery_after_faults={f['kind']:False for f in config['faults']},
+                            outside_frames=0,rover_contacts=0,obstacle_contacts=0,
+                            completion_ms=None)
         self.closed = False
+        self.yield_start_distance = None
+        self.fault_recovery = {f['kind']:[False,False] for f in config['faults']}
 
     def fault(self, kind, now):
         return any(f['kind']==kind and f['start_ms']<=now<f['end_ms'] for f in self.config['faults'])
@@ -140,6 +213,35 @@ class Simulation:
         self.status = replies
         self.world.advance([(r['left'],r['right']) for r in replies])
         snapshot = self.world.snapshot()
+        if all(r['left'] or r['right'] for r in replies):
+            self.metrics['simultaneous_motion_ms'] += 10
+        self.metrics['yields'] = max(self.metrics['yields'],sum(r.get('yields',0) for r in replies))
+        peer_distance = ((snapshot['rovers'][0][0]-snapshot['rovers'][1][0])**2 +
+                         (snapshot['rovers'][0][1]-snapshot['rovers'][1][1])**2)**.5
+        if replies[1]['phase'] == 5 and self.yield_start_distance is None:
+            self.yield_start_distance = peer_distance
+        elif replies[1]['phase'] != 5 and self.yield_start_distance is not None:
+            if peer_distance >= self.yield_start_distance + self.world.grid['cell_mm'] * .5:
+                self.metrics['effective_yields'] += 1
+            self.yield_start_distance = None
+        self.metrics['reassignments'] = max(self.metrics['reassignments'],sum(r.get('reassignments',0) for r in replies))
+        self.metrics['blocked_mask'] |= replies[0].get('blocked_mask',0) | replies[1].get('blocked_mask',0)
+        for fault in self.config['faults']:
+            if now >= fault['end_ms']:
+                for rover, reply in enumerate(replies):
+                    if reply['left'] or reply['right']:
+                        self.fault_recovery[fault['kind']][rover] = True
+                self.metrics['recovery_after_faults'][fault['kind']] = all(
+                    self.fault_recovery[fault['kind']])
+        if snapshot['outside']:
+            self.metrics['outside_frames'] += 1
+        for contact in snapshot['contacts']:
+            names = contact['objects']
+            if 'obstacle' in names:self.metrics['obstacle_contacts'] += 1
+            if (any(n.startswith('rover-10') for n in names) and any(n.startswith('rover-11') for n in names)):
+                self.metrics['rover_contacts'] += 1
+        if self.metrics['completion_ms'] is None and all(snapshot['delivered']) and all(r['available'] for r in replies):
+            self.metrics['completion_ms'] = now
         declared = replies[0]['delivered'] | replies[1]['delivered']
         mismatches = [i for i,inside in enumerate(snapshot['delivered']) if bool(declared & (1<<i)) != inside]
         signature = ([r['phase'] for r in replies],[r.get('failure',0) for r in replies],snapshot['delivered'],mismatches,bool(snapshot['outside']))
@@ -147,7 +249,9 @@ class Simulation:
             self.events.append(dict(time_ms=now,phases=signature[0],failures=signature[1],
                                     physical_delivery=signature[2],delivery_disagreement=mismatches,outside=snapshot['outside']))
             self.previous = signature
-        self.trace.write(json.dumps(dict(step=self.step_id,inputs=inputs,outputs=replies,world=snapshot),separators=(',',':'))+'\n')
+        inferences = [controller.last_inferences for controller in self.controllers]
+        self.trace.write(json.dumps(dict(step=self.step_id,inputs=inputs,outputs=replies,
+                                         policy=inferences,world=snapshot),separators=(',',':'))+'\n')
         return snapshot
 
     def close(self):
@@ -158,11 +262,21 @@ class Simulation:
             controller.close()
         if hasattr(self,'trace'):
             self.trace.close()
-            report = dict(steps=self.step_id,events=self.events,final=self.world.snapshot(),controllers=self.status)
+            final = self.world.snapshot()
+            declared = self.status[0]['delivered'] | self.status[1]['delivered']
+            eligible = (all(final['delivered']) and declared == 7 and
+                        self.metrics['outside_frames'] == 0 and
+                        self.metrics['rover_contacts'] == 0 and self.metrics['obstacle_contacts'] == 0 and
+                        all(r['available'] and r['left']==r['right']==0 for r in self.status))
+            report = dict(steps=self.step_id,events=self.events,final=final,
+                          controllers=self.status,metrics=self.metrics,
+                          physical_delivery_mask=sum((1<<i) for i,value in enumerate(final['delivered']) if value),
+                          declared_delivery_mask=declared,model_sha256=self.model_sha256,
+                          eligible=eligible)
             (self.output/'report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
 
 
-def replay(trace, exe, output):
+def replay(trace, exe, output, model=None):
     """Replay exact saved controller inputs, independent of physics version."""
     output = Path(output)
     output.mkdir(parents=True,exist_ok=True)
@@ -170,7 +284,7 @@ def replay(trace, exe, output):
     count = 0
     try:
         for i in range(2):
-            controllers.append(Controller(exe,10+i,output/f'replay-{10+i}.log'))
+            controllers.append(Controller(exe,10+i,output/f'replay-{10+i}.log',model))
         with Path(trace).open(encoding='utf-8') as stream:
             for line in stream:
                 record = json.loads(line)
