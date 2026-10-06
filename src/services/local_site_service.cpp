@@ -13,7 +13,6 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
-#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_vfs.h"
 #include "lwip/ip4_addr.h"
@@ -23,7 +22,6 @@
 #include "peer_comms_service.hpp"
 #include "rover_service.hpp"
 #include "vision_service.hpp"
-#include "tinyml_policy.hpp"
 
 #define STATIC_PARTITION_LABEL "static"
 #define STATIC_BASE_PATH "/static"
@@ -141,21 +139,6 @@ static esp_err_t state_handler(httpd_req_t *request)
     cJSON_AddStringToObject(competition_check, "role",
         competition.role == COMPETITION_ROLE_COMMANDER ? "commander" :
         competition.role == COMPETITION_ROLE_SOLDIER ? "soldier" : "none");
-    tinyml_policy_status_t model = {};
-    tinyml_policy_get_status(&model);
-    cJSON *model_json = cJSON_AddObjectToObject(root, "tinyml");
-    cJSON_AddBoolToObject(model_json, "available", model.available);
-    cJSON_AddNumberToObject(model_json, "version", model.version);
-    cJSON_AddNumberToObject(model_json, "length", model.length);
-    cJSON_AddNumberToObject(model_json, "crc32", model.crc32);
-    cJSON_AddNumberToObject(model_json, "arena_bytes", model.arena_bytes);
-    cJSON_AddNumberToObject(model_json, "arena_used_bytes", model.arena_used_bytes);
-    cJSON_AddNumberToObject(model_json, "input_count", model.input_count);
-    cJSON_AddNumberToObject(model_json, "output_count", model.output_count);
-    cJSON_AddNumberToObject(model_json, "minimum_free_heap_bytes", esp_get_minimum_free_heap_size());
-    cJSON_AddNumberToObject(model_json, "latency_us", model.last_latency_us);
-    cJSON_AddNumberToObject(model_json, "inference_count", model.inference_count);
-    cJSON_AddNumberToObject(model_json, "error", model.error);
 
     cJSON *imu_json = cJSON_AddObjectToObject(root, "imu");
     cJSON_AddBoolToObject(imu_json, "valid", imu.valid);
@@ -286,10 +269,6 @@ static esp_err_t peer_state_handler(httpd_req_t *request)
     cJSON_AddStringToObject(root, "hostname", "");
     cJSON_AddStringToObject(root, "mode", app_mode_name((app_mode_t)peer.mode));
     cJSON_AddStringToObject(root, "competition", "stub");
-    cJSON *model = cJSON_AddObjectToObject(root, "tinyml");
-    cJSON_AddBoolToObject(model, "available", peer.model_available);
-    cJSON_AddNumberToObject(model, "version", peer.model_version);
-    cJSON_AddNumberToObject(model, "crc32", peer.model_crc32);
     cJSON *vision_stream = cJSON_AddObjectToObject(root, "vision_stream");
     cJSON_AddBoolToObject(vision_stream, "recent",
         peer.vision_recent && (uint64_t)peer.vision_frame_age_ms + peer.age_ms <= 750);

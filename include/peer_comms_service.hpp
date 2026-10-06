@@ -4,18 +4,16 @@
 #include <stdint.h>
 #include "esp_err.h"
 
+#define PEER_MISSION_MAX_POINTS 64U
+#define PEER_MISSION_FRAGMENT_POINTS 8U
+
+typedef struct { float col, row; } peer_mission_point_t;
 typedef struct {
     uint32_t id;
     uint8_t color;
-    uint8_t retry;
-} peer_assignment_t;
-
-typedef enum {
-    PEER_ASSIGNMENT_NONE = 0,
-    PEER_ASSIGNMENT_ACTIVE,
-    PEER_ASSIGNMENT_DONE,
-    PEER_ASSIGNMENT_FAILED,
-} peer_assignment_result_t;
+    uint8_t point_count;
+    peer_mission_point_t points[PEER_MISSION_MAX_POINTS];
+} peer_mission_t;
 
 typedef struct {
     bool configured;
@@ -73,15 +71,9 @@ typedef struct {
     bool link_verified;
     bool identity_received;
     uint8_t verified_identity;
-    uint32_t assignment_ack_id;
-    bool assignment_ack_accepted;
-    uint32_t assignment_id;
-    uint8_t assignment_color;
-    uint8_t assignment_result;
-    uint8_t assignment_phase;
-    bool model_available;
-    uint32_t model_version;
-    uint32_t model_crc32;
+    uint32_t mission_ack_id;
+    uint8_t mission_ack_fragment;
+    bool mission_ack_accepted;
     uint8_t competition_delivered_mask;
     bool competition_available;
     uint32_t mode_ack_nonce;
@@ -114,5 +106,5 @@ esp_err_t peer_comms_service_probe_link(void);
 
 /** Envía o reenvía WHO_AM_I; consultar identity_received en el estado. */
 esp_err_t peer_comms_service_query_identity(void);
-esp_err_t peer_comms_service_send_assignment(const peer_assignment_t *assignment);
-bool peer_comms_service_get_assignment(peer_assignment_t *assignment);
+esp_err_t peer_comms_service_send_mission_fragment(const peer_mission_t *mission, uint8_t fragment);
+bool peer_comms_service_get_mission(peer_mission_t *mission);

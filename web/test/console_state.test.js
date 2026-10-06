@@ -3,8 +3,7 @@ import assert from 'node:assert/strict'
 import { competitionEligibility, formatPoseSpeed, mergeDiagnostics,
   navigationMessage, targetRejectionMessage } from '../src/console_state.js'
 
-const ready = () => [10, 11].map(id => ({ id, online: true, mode: 'test', visionRecent: true,
-  modelAvailable: true, modelVersion: 1, modelCrc32: 0x12345678 }))
+const ready = () => [10, 11].map(id => ({ id, online: true, mode: 'test', visionRecent: true }))
 
 test('competition requires both rovers online, in test mode, with recent server frames', () => {
   assert.equal(competitionEligibility(ready()).enabled, true)
@@ -12,16 +11,12 @@ test('competition requires both rovers online, in test mode, with recent server 
     rover => { rover.online = false },
     rover => { rover.mode = 'competition' },
     rover => { rover.visionRecent = false },
-    rover => { rover.modelAvailable = false },
   ]) {
     const states = ready()
     change(states[1])
     assert.equal(competitionEligibility(states).enabled, false)
     assert.match(competitionEligibility(states).reason, /Rover 11/)
   }
-  const mismatched = ready(); mismatched[1].modelCrc32++
-  assert.equal(competitionEligibility(mismatched).enabled, false)
-  assert.match(competitionEligibility(mismatched).reason, /CRC/)
 })
 
 test('pose speed handles fields omitted from peer telemetry', () => {

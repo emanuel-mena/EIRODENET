@@ -19,16 +19,9 @@ class Arena(QWidget):
         self.setAccessibleName('Pista de un metro con rovers, brazos, cubos y rutas')
 
     def paintEvent(self, event):
+        w = self.window.sim.world
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        if not getattr(self.window, 'sim', None):
-            p.fillRect(self.rect(), QColor('#f4f5f6'))
-            p.setPen(QColor('#637080'))
-            p.drawText(self.rect(), Qt.AlignCenter,
-                       'Seleccione y cargue un candidato para visualizarlo')
-            p.end()
-            return
-        w = self.window.sim.world
         size = min(self.width(),self.height())-32
         p.translate((self.width()-size)/2,(self.height()-size)/2)
         p.scale(size/1000,size/1000)
@@ -73,11 +66,11 @@ class Arena(QWidget):
 
 
 class Window(QMainWindow):
-    def __init__(self, config, output, exe, model=None):
+    def __init__(self, config, output, exe):
         super().__init__()
-        self.config,self.output,self.exe,self.model = config,output,exe,model
+        self.config,self.output,self.exe = config,output,exe
         self.run_number = 0
-        self.sim = Simulation(config,output/'run-000',exe,model=model)
+        self.sim = Simulation(config,output/'run-000',exe)
         self.setWindowTitle(f'EIRODENET · Simulación del firmware · {self.sim.world.grid["cols"]} × {self.sim.world.grid["rows"]}')
         self.resize(900,850)
         root = QWidget();layout = QVBoxLayout(root)
@@ -129,7 +122,7 @@ class Window(QMainWindow):
 
     def reset(self):
         self.pause();self.sim.close();self.run_number += 1
-        self.sim = Simulation(self.config,self.output/f'run-{self.run_number:03d}',self.exe,model=self.model)
+        self.sim = Simulation(self.config,self.output/f'run-{self.run_number:03d}',self.exe)
         self.refresh()
 
     def generate_layout(self):
@@ -146,7 +139,7 @@ class Window(QMainWindow):
         self.pause();self.sim.close();event.accept()
 
 
-def run(config,output,exe,model=None):
+def run(config,output,exe):
     app = QApplication.instance() or QApplication(sys.argv)
-    window = Window(config,output,exe,model);window.show()
+    window = Window(config,output,exe);window.show()
     app.exec()

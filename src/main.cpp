@@ -12,7 +12,6 @@
 #include "rover_service.hpp"
 #include "serial_protocol.hpp"
 #include "vision_service.hpp"
-#include "tinyml_policy.hpp"
 
 static const char *TAG = "rover";
 
@@ -45,8 +44,6 @@ extern "C" void app_main(void)
     err = rover_service_start();
     ESP_LOGI(TAG, "Servicios del rover: %s", esp_err_to_name(err));
     if (err == ESP_OK) {
-        const esp_err_t model_err = tinyml_policy_start();
-        ESP_LOGI(TAG, "Politica TinyML: %s", esp_err_to_name(model_err));
         err = vision_service_start();
         ESP_LOGI(TAG, "Cliente de vision v3: %s", esp_err_to_name(err));
         err = navigation_service_start();

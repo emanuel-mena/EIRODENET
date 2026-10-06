@@ -14,7 +14,6 @@
 #include "peer_comms_service.hpp"
 #include "rover_service.hpp"
 #include "vision_service.hpp"
-#include "tinyml_policy.hpp"
 
 #define WIFI_WAIT_MS 15000
 #define SERVER_DATA_WAIT_MS 5000
@@ -64,7 +63,6 @@ const char *competition_service_status(void)
     if (status.failed_step == 3) return "error_espnow";
     if (status.failed_step == 4) return "error_identity";
     if (status.failed_step == 5) return "error_mac";
-    if (status.failed_step == 6) return "error_model";
     if (status.ready) return status.role == COMPETITION_ROLE_COMMANDER
         ? "ready_commander" : "ready_soldier";
     return status.step == 0 ? "idle" : "verifying";
@@ -184,29 +182,8 @@ static void verify(uint32_t generation)
         return;
     }
     if (!active(generation)) return;
-    const competition_role_t role = mac_number(own_mac) > mac_number(config.peer_mac)
-        ? COMPETITION_ROLE_COMMANDER : COMPETITION_ROLE_SOLDIER;
-    publish(6, 0, false, role, ESP_OK);
-    tinyml_policy_status_t model = {};
-    tinyml_policy_get_status(&model);
-    if (!model.available || model.error != ESP_OK) {
-        publish(6, 6, false, role, model.error);
-        return;
-    }
-    const int64_t model_deadline = esp_timer_get_time() / 1000 + PEER_WAIT_MS;
-    while (active(generation) && esp_timer_get_time() / 1000 < model_deadline) {
-        peer_comms_service_get_status(&peer);
-        if (peer.model_version != 0) break;
-        vTaskDelay(pdMS_TO_TICKS(PEER_RETRY_MS));
-    }
-    if (!active(generation)) return;
-    peer_comms_service_get_status(&peer);
-    if (!peer.model_available || peer.model_version != model.version ||
-        peer.model_crc32 != model.crc32) {
-        publish(6, 6, false, role, ESP_ERR_INVALID_VERSION);
-        return;
-    }
-    publish(6, 0, true, role, ESP_OK);
+    publish(5, 0, true, mac_number(own_mac) > mac_number(config.peer_mac)
+            ? COMPETITION_ROLE_COMMANDER : COMPETITION_ROLE_SOLDIER, ESP_OK);
 }
 
 static void calibrate_heading(uint32_t generation)

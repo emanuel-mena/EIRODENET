@@ -48,9 +48,6 @@ class Parameters:
     vision_delay_ms: int = 0
     peer_delay_ms: int = 10
     noise_mm: float = 0.0
-    infrared_noise_fraction: float = 0.0
-    gyro_noise_dps: float = 0.0
-    ultrasonic_noise_mm: float = 0.0
     vision_entropy: bool = True
     substeps: int = 10
 
@@ -113,8 +110,7 @@ class World:
             raise ValueError('vision_entropy debe ser booleano.')
         if any(values[k]<=0 for k in ('rover_mass','cube_mass','wheel_track_mm','traction_accel_mm_s2','vision_period_ms')):
             raise ValueError('Masa, separación de ruedas, aceleración y período deben ser positivos.')
-        if any(values[k]<0 for k in ('vision_delay_ms','peer_delay_ms','noise_mm','contact_friction','cube_floor_deceleration_mm_s2',
-                                     'infrared_noise_fraction','gyro_noise_dps','ultrasonic_noise_mm')):
+        if any(values[k]<0 for k in ('vision_delay_ms','peer_delay_ms','noise_mm','contact_friction','cube_floor_deceleration_mm_s2')):
             raise ValueError('Retardos, ruido y fricción no pueden ser negativos.')
         if not 0 <= self.p.motor_strength_difference <= 1:
             raise ValueError('La diferencia de fuerza de los motores debe estar entre 0 y 1.')
@@ -203,22 +199,17 @@ class World:
             p = b.local_to_world((x,y))
             row = 1000-p.y
             black = black_at(p.x,row)
-            base = 3200 if black else 600
-            ir.append(round(max(0,min(4095,base*(1+self.rng.uniform(
-                -self.p.infrared_noise_fraction,self.p.infrared_noise_fraction))))))
+            ir.append(3200 if black else 600)
         stamp = self.time_ms // self.p.ultrasonic_period_ms * self.p.ultrasonic_period_ms
         cached = self.ultrasonic_samples[i]
         if cached is None or cached['timestamp_ms'] != stamp:
             origin = b.local_to_world((47.5,0))
             end = origin + pymunk.Vec2d(2000,0).rotated(b.angle)
             hit = self.space.segment_query_first(origin, end, 0, pymunk.ShapeFilter(group=i+1))
-            measured = hit.alpha*2000 if hit else 2000
-            measured += self.rng.uniform(-self.p.ultrasonic_noise_mm,self.p.ultrasonic_noise_mm)
             cached = dict(timestamp_ms=stamp, ultrasonic_valid=hit is not None,
-                          distance_mm=round(max(0,measured)))
+                          distance_mm=round(hit.alpha*2000) if hit else 2000)
             self.ultrasonic_samples[i] = cached
-        return dict(ir=ir, gyro=math.degrees(b.angular_velocity)+self.rng.uniform(
-            -self.p.gyro_noise_dps,self.p.gyro_noise_dps), **cached)
+        return dict(ir=ir, gyro=math.degrees(b.angular_velocity), **cached)
 
     def advance(self, commands):
         self.contacts = []

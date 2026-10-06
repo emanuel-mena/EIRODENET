@@ -1,16 +1,4 @@
 dependencies:
-  espressif/esp-nn:
-    component_hash: 3b3411b0e4ad1717a72870fde9f9b67cef6f3f97491cc64fcfc1910a8fd8a246
-    source:
-      service_url: https://api.components.espressif.com/
-      type: service
-    version: 1.4.1
-  espressif/esp-tflite-micro:
-    component_hash: bdb2625ed976d5b861177cdc295abc6738724f84f4c7c60fc58c721d2b30bed6
-    source:
-      service_url: https://api.components.espressif.com/
-      type: service
-    version: 1.4.1
   espressif/led_strip:
     component_hash: 28621486f77229aaf81c71f5e15d6fbf36c2949cf11094e07090593e659e7639
     source:
@@ -28,6 +16,6 @@ dependencies:
     source:
       type: idf
     version: 5.4.1
-manifest_hash: d2242bc84fe98e66223a17139cf405dcb3ab48b059f91ea3f5a960772c4b2c29
+manifest_hash: 3172d73bec75f77c811041796b93c84e7b981df2955acbce7381f262d4513827
 target: esp32
 version: 1.0.0

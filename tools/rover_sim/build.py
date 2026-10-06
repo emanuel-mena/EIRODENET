@@ -17,8 +17,7 @@ def build():
     if not (cjson / 'cJSON.c').exists():
         raise RuntimeError('Falta cJSON de ESP-IDF; ejecute pio run primero.')
     sources = [ROOT / 'src/services' / (name + '.cpp') for name in
-               ('navigation_service', 'competition_runtime', 'tinyml_policy',
-                'grid_planner', 'motion_control', 'vision_contract')]
+               ('navigation_service', 'competition_runtime', 'grid_planner', 'motion_control', 'vision_contract')]
     sources += [ROOT / 'tools/rover_sim/host/main.cpp', cjson / 'cJSON.c']
     inputs = sources + [cjson/'cJSON.h'] + sorted((ROOT/'include').glob('*.hpp')) + sorted(
         p for p in (ROOT/'tools/rover_sim/host').rglob('*') if p.suffix in ('.h', '.hpp'))
