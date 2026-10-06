@@ -84,6 +84,7 @@ typedef struct {
     bool mission_ack_accepted;
     uint8_t competition_delivered_mask;
     bool competition_available;
+    bool competition_moving;
     uint32_t mode_ack_nonce;
     bool mode_ack_accepted;
     uint8_t mode_ack_reason;

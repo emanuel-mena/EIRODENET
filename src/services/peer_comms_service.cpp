@@ -21,7 +21,7 @@
 #include "vision_service.hpp"
 
 #define PEER_MAGIC 0x524f4952U
-#define PEER_PROTOCOL_VERSION 9U
+#define PEER_PROTOCOL_VERSION 10U
 #define PEER_STATE_PERIOD_MS 200U
 #define PEER_TIMEOUT_MS 1500U
 
@@ -82,6 +82,7 @@ typedef struct {
     int16_t drive_right;
     uint8_t competition_delivered_mask;
     uint8_t competition_available;
+    uint8_t competition_moving;
     uint8_t vision_recent;
     uint16_t vision_frame_age_ms;
     uint32_t boot_id;
@@ -251,6 +252,7 @@ static void send_local_state(void)
     state->drive_right = drive.right;
     state->competition_delivered_mask = competition_runtime_delivered_mask();
     state->competition_available = competition_runtime_available();
+    state->competition_moving = competition_runtime_moving();
     uint32_t frame_age = UINT32_MAX;
     state->vision_recent = recent_vision(&frame_age);
     state->vision_frame_age_ms = frame_age > UINT16_MAX ? UINT16_MAX : (uint16_t)frame_age;
@@ -316,6 +318,7 @@ static void accept_state(const peer_packet_t *packet)
     s_status.drive_right = state->drive_right;
     s_status.competition_delivered_mask = state->competition_delivered_mask;
     s_status.competition_available = state->competition_available != 0;
+    s_status.competition_moving = state->competition_moving != 0;
     s_status.vision_recent = state->vision_recent != 0;
     s_status.vision_frame_age_ms = state->vision_frame_age_ms;
     s_status.boot_id = state->boot_id;

@@ -38,6 +38,8 @@ typedef enum {
     EXEC_DONE = 7,
     EXEC_HOLD = 8,
     EXEC_STALL_PAUSE = 9,
+    EXEC_DEPOT_WAIT_VISION = 10,
+    EXEC_REVERSE_AFTER_DELIVERY = 11,
 } exec_phase_t;
 
 static const char *TAG = "competition_run";
@@ -71,6 +73,10 @@ static float s_stall_row;
 static bool s_stall_anchor_valid;
 static uint64_t s_hold_ms;
 static uint64_t s_peer_block_since_ms;
+static uint32_t s_depot_frame_sequence;
+static uint64_t s_reverse_started_ms;
+static uint8_t s_pending_reserve_color = UINT8_MAX;
+static uint64_t s_commander_delay_started_ms;
 
 static uint64_t now_ms(void) { return (uint64_t)(esp_timer_get_time() / 1000); }
 static float distance(float ax, float ay, float bx, float by)
@@ -179,6 +185,8 @@ static void begin_local_mission(const peer_mission_t *mission)
     s_stall_anchor_valid = false;
     s_stall_since_ms = 0;
     s_have_detour_target = false;
+    s_depot_frame_sequence = 0;
+    s_commander_delay_started_ms = 0;
 }
 
 static void begin_remote_mission(const peer_mission_t *mission)
@@ -219,19 +227,45 @@ static void assign_initial(const vision_status_t *v)
         }
     }
 
+    uint8_t soldier_color = farthest;
+    if (count >= 3 && v->peer_valid && v->peer_age_ms <= FRESH_MS) {
+        bool path_blocked = false;
+        for (uint8_t i = 0; i < count; ++i) {
+            const uint8_t color = available[i];
+            if (color == farthest) continue;
+            if (competition_assignment_line_hits_cube(
+                    v->peer_col, v->peer_row,
+                    v->cubes[farthest].col, v->cubes[farthest].row,
+                    v->cubes[color].col, v->cubes[color].row)) {
+                path_blocked = true;
+                break;
+            }
+        }
+        if (path_blocked) {
+            for (uint8_t i = 0; i < count; ++i) {
+                if (available[i] != nearest && available[i] != farthest) {
+                    soldier_color = available[i];
+                    break;
+                }
+            }
+            ESP_LOGI(TAG, "Ruta del soldado bloqueada: cubo=%u reemplazado por cubo=%u",
+                     farthest, soldier_color);
+        }
+    }
+
     const peer_mission_t nearest_mission = mission_for(v, nearest);
     begin_local_mission(&nearest_mission);
-    if (count >= 2 && farthest != nearest) {
-        const peer_mission_t farthest_mission = mission_for(v, farthest);
-        begin_remote_mission(&farthest_mission);
+    if (count >= 2 && soldier_color != nearest) {
+        const peer_mission_t soldier_mission = mission_for(v, soldier_color);
+        begin_remote_mission(&soldier_mission);
     }
     for (uint8_t i = 0; i < count; ++i) {
-        if (available[i] != nearest && available[i] != farthest) {
+        if (available[i] != nearest && available[i] != soldier_color) {
             s_reserved_color = available[i];
             break;
         }
     }
-    ESP_LOGI(TAG, "Asignacion directa: comandante cubo=%u soldado cubo=%u reservado=%u",
+    ESP_LOGI(TAG, "Asignacion: comandante cubo=%u soldado cubo=%u reservado=%u",
              nearest, s_remote.id ? s_remote.color : UINT8_MAX, s_reserved_color);
 }
 
@@ -376,25 +410,56 @@ static void complete_delivery(const vision_status_t *v, competition_role_t role)
     peer_comms_service_send_delivery(s_local.id, color);
     ESP_LOGI(TAG, "Entrega confirmada: cubo=%u mision=%lu", color,
              (unsigned long)s_local.id);
-    s_phase = EXEC_DONE;
+    s_phase = EXEC_REVERSE_AFTER_DELIVERY;
+    s_reverse_started_ms = now_ms();
     if (role == COMPETITION_ROLE_COMMANDER &&
         s_reserved_color < VISION_MAX_CUBES && !s_reserve_assigned &&
         s_delivered_mask != 0) {
-        const peer_mission_t reserve = mission_for(v, s_reserved_color);
         s_reserve_assigned = true;
         if (own_identity() == APP_STORAGE_ROVER_10 || own_identity() == APP_STORAGE_ROVER_11) {
-            // The commander is the only rover allowed to choose the winner;
-            // its own delivery makes it the local winner.
-            begin_local_mission(&reserve);
+            // Keep the reserve mission pending until the mandatory reverse
+            // maneuver has completed.
+            s_pending_reserve_color = s_reserved_color;
         }
     }
 }
 
+static void activate_pending_reserve(const vision_status_t *v, competition_role_t role)
+{
+    if (role != COMPETITION_ROLE_COMMANDER || s_phase != EXEC_DONE ||
+        s_pending_reserve_color >= VISION_MAX_CUBES || !fresh(v)) return;
+    const peer_mission_t reserve = mission_for(v, s_pending_reserve_color);
+    s_pending_reserve_color = UINT8_MAX;
+    // The commander is the only rover allowed to choose the winner; its next
+    // local mission starts only after the reverse maneuver has ended.
+    begin_local_mission(&reserve);
+}
+
 static void execute_local(const vision_status_t *v, competition_role_t role)
 {
+    if (s_phase == EXEC_REVERSE_AFTER_DELIVERY) {
+        if (now_ms() - s_reverse_started_ms < COMPETITION_DELIVERY_REVERSE_MS) {
+            motor_adapter_set(-COMPETITION_HALF_PWM, -COMPETITION_HALF_PWM);
+            return;
+        }
+        stop();
+        s_phase = EXEC_DONE;
+        return;
+    }
     if (!s_local.id || s_phase == EXEC_DONE) return;
     if (s_phase == EXEC_WAIT) {
         if (v->phase != VISION_PHASE_RUNNING) return;
+        if (role == COMPETITION_ROLE_COMMANDER && s_commander_delay_started_ms == 0) {
+            peer_comms_status_t peer = {};
+            peer_comms_service_get_status(&peer);
+            if (!peer.competition_moving) return;
+            s_commander_delay_started_ms = now_ms();
+        }
+        if (role == COMPETITION_ROLE_COMMANDER &&
+            now_ms() - s_commander_delay_started_ms < COMPETITION_COMMANDER_START_DELAY_MS) {
+            motor_adapter_stop();
+            return;
+        }
         s_phase = EXEC_TO_CUBE;
     }
     const uint8_t color = s_local.color;
@@ -467,6 +532,7 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         const float target = atan2f(-(v->depot_row[color] - v->row),
                                     v->depot_col[color] - v->col) * 57.2957795f;
         if (turn_to(v, target, 700)) {
+            s_depot_frame_sequence = v->sequence;
             s_phase = EXEC_TO_DEPOT;
             s_stall_since_ms = 0;
             s_stall_anchor_valid = false;
@@ -474,10 +540,16 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         return;
     }
     if (s_phase == EXEC_TO_DEPOT) {
-        if (distance(v->col, v->row, v->depot_col[color], v->depot_row[color]) <=
-            COMPETITION_DEPOT_STOP_CELLS) {
+        const float depot_distance = distance(v->col, v->row,
+                                              v->depot_col[color], v->depot_row[color]);
+        if (!competition_depot_needs_correction(depot_distance)) {
             motor_adapter_stop();
             s_phase = EXEC_PUSH;
+            return;
+        }
+        if (competition_depot_frame_is_new(v->sequence, s_depot_frame_sequence)) {
+            motor_adapter_stop();
+            s_phase = EXEC_DEPOT_WAIT_VISION;
             return;
         }
         if (role == COMPETITION_ROLE_SOLDIER) update_stall(v);
@@ -492,6 +564,10 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
             return;
         }
         direct_drive(v, v->depot_col[color], v->depot_row[color], 1000);
+        return;
+    }
+    if (s_phase == EXEC_DEPOT_WAIT_VISION) {
+        s_phase = EXEC_ALIGN_DEPOT;
         return;
     }
     if (s_phase == EXEC_STALL_PAUSE) {
@@ -510,7 +586,7 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         }
         if (role == COMPETITION_ROLE_SOLDIER) update_stall(v);
         if (s_phase == EXEC_STALL_PAUSE) return;
-        direct_drive(v, v->depot_col[color], v->depot_row[color], COMPETITION_HALF_PWM);
+        direct_drive(v, v->depot_col[color], v->depot_row[color], COMPETITION_DEPOT_SLOW_PWM);
     }
 }
 
@@ -535,6 +611,10 @@ void competition_runtime_reset(void)
     s_stall_anchor_valid = false;
     s_hold_ms = 0;
     s_peer_block_since_ms = 0;
+    s_depot_frame_sequence = 0;
+    s_reverse_started_ms = 0;
+    s_pending_reserve_color = UINT8_MAX;
+    s_commander_delay_started_ms = 0;
     s_last_delivery_event_id = 0;
     s_delivery_mission_id = 0;
     s_delivery_color = UINT8_MAX;
@@ -543,6 +623,13 @@ void competition_runtime_reset(void)
 }
 
 uint8_t competition_runtime_delivered_mask(void) { return s_delivered_mask; }
+bool competition_runtime_moving(void)
+{
+    return s_phase == EXEC_TO_CUBE || s_phase == EXEC_DETOUR_TURN ||
+           s_phase == EXEC_DETOUR_ADVANCE || s_phase == EXEC_ALIGN_DEPOT ||
+           s_phase == EXEC_TO_DEPOT || s_phase == EXEC_PUSH ||
+           s_phase == EXEC_REVERSE_AFTER_DELIVERY;
+}
 bool competition_runtime_available(void)
 {
     return s_phase == EXEC_DONE || (s_phase == EXEC_WAIT && !s_local.id);
@@ -563,7 +650,8 @@ void competition_runtime_get_status(competition_runtime_status_t *status)
     vision_service_get_status(&v);
     if (s_local.color >= VISION_MAX_CUBES) return;
     if (s_phase == EXEC_ALIGN_DEPOT || s_phase == EXEC_TO_DEPOT ||
-        s_phase == EXEC_PUSH) {
+        s_phase == EXEC_DEPOT_WAIT_VISION || s_phase == EXEC_PUSH ||
+        s_phase == EXEC_REVERSE_AFTER_DELIVERY) {
         status->target_col = v.depot_col[s_local.color];
         status->target_row = v.depot_row[s_local.color];
     } else if (s_have_detour_target) {
@@ -591,9 +679,13 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation)
     peer_comms_status_t peer = {};
     peer_comms_service_get_status(&peer);
     if (app_mode_get() != APP_MODE_COMPETITION ||
-        (v.phase != VISION_PHASE_READY && v.phase != VISION_PHASE_RUNNING) ||
-        !fresh(&v) || !peer.connected || peer.mode != APP_MODE_COMPETITION) {
+        (v.phase != VISION_PHASE_READY && v.phase != VISION_PHASE_RUNNING)) {
         if (s_phase != EXEC_WAIT && s_phase != EXEC_DONE) stop();
+        return;
+    }
+    if (!fresh(&v) || !peer.connected || peer.mode != APP_MODE_COMPETITION) {
+        if (s_phase == EXEC_REVERSE_AFTER_DELIVERY) execute_local(&v, role);
+        else if (s_phase != EXEC_WAIT && s_phase != EXEC_DONE) stop();
         return;
     }
 
@@ -606,6 +698,7 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation)
     }
 
     if (role == COMPETITION_ROLE_COMMANDER) {
+        activate_pending_reserve(&v, role);
         if (!s_assigned_mask) assign_initial(&v);
         send_remote();
         peer_delivery_event_t event = {};

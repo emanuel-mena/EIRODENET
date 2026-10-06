@@ -20,4 +20,5 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation);
 void competition_runtime_reset(void);
 uint8_t competition_runtime_delivered_mask(void);
 bool competition_runtime_available(void);
+bool competition_runtime_moving(void);
 void competition_runtime_get_status(competition_runtime_status_t *status);

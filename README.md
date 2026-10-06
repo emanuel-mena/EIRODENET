@@ -267,16 +267,24 @@ la velocidad IR con la IMU y vuelve al origen. Un fallo de IMU, IR o deriva bloq
 la competencia. La consigna de media potencia es 700/1000.
 
 La competencia espera READY y sólo mueve motores en RUNNING. El comandante asigna
-el cubo más cercano a su posición y el soldado el más lejano; el tercero queda
-reservado. El primer rover que confirma una entrega publica un evento ESP-NOW con
+el cubo más cercano a su posición y el soldado el más lejano, salvo que la línea
+del soldado a ese cubo, con ancho de 5 celdas, intersecte otro cubo modelado como
+un círculo de 3 celdas de diámetro; en ese caso el soldado recibe el tercer cubo y
+el cubo desplazado queda reservado. El comandante comienza a moverse 3 segundos
+después de que el estado ESP-NOW confirme que el soldado comenzó a moverse. El
+primer rover que confirma una entrega publica un evento ESP-NOW con
 identificador, color y tiempo; el comandante arbitra por tiempo y luego por ID y
 reasigna el cubo restante. Las notificaciones se repiten de forma idempotente.
 
 La navegación de competencia es directa: gira con la IMU al objetivo y avanza a la
 mayor velocidad. Un obstáculo ultrasónico a 3 cm o menos sólo desvía si el cubo está
 a más de 5 celdas: gira 60 grados a la derecha, avanza 7 celdas y recalcula el
-rumbo. Para el acople gira y avanza con consigna 700, se detiene a 6 celdas y
-empuja a 700 hasta la confirmación del servidor. Ante un solapamiento previsto entre
+rumbo. Para el acople, el rover se detiene después de cada nueva pose de visión,
+recalcula el rumbo al centro del acopio y vuelve a avanzar mientras está a más de
+2.5 celdas. A 2.5 celdas o menos empuja hacia el centro con la consigna mínima móvil
+de 700/1000 PWM hasta que el contrato v3 confirme `cube.in_depot`. Ante un
+acopio confirmado, ambos motores retroceden durante 700 ms antes de que el rover
+quede disponible o active su siguiente objetivo. Ante un solapamiento previsto entre
 rovers, el comandante se detiene y el soldado conserva su movimiento durante un
 segundo; si el solapamiento persiste, el soldado retrocede con consigna 700 hasta
 liberar la envolvente. Si el soldado no progresa más de una celda durante tres
