@@ -77,6 +77,23 @@ float motion_wrap_degrees(float degrees)
     return degrees;
 }
 
+void motion_integrate_axle_pose(float *col, float *row, float *theta_deg,
+                                float forward_cells_s, float angular_speed_dps,
+                                float axle_offset_cells, float dt_s)
+{
+    if (!col || !row || !theta_deg || !isfinite(forward_cells_s) ||
+        !isfinite(angular_speed_dps) || !isfinite(axle_offset_cells) ||
+        !isfinite(dt_s) || dt_s <= 0.0f) return;
+    const float omega = angular_speed_dps * (float)M_PI / 180.0f;
+    const float midpoint = *theta_deg * (float)M_PI / 180.0f + omega * dt_s * 0.5f;
+    // Local y is positive to the rover's left. The axle is behind the body
+    // centre, so angular motion gives the centre a lateral velocity.
+    const float lateral_cells_s = -omega * axle_offset_cells;
+    *col += (forward_cells_s * cosf(midpoint) - lateral_cells_s * sinf(midpoint)) * dt_s;
+    *row -= (forward_cells_s * sinf(midpoint) + lateral_cells_s * cosf(midpoint)) * dt_s;
+    *theta_deg = motion_wrap_degrees(*theta_deg + angular_speed_dps * dt_s);
+}
+
 void motion_drive_command(float heading_error_deg, float cross_track_cells,
                           float angular_speed_dps, float trim, int *left, int *right,
                           bool *saturated)

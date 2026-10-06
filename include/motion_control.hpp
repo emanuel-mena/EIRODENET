@@ -28,6 +28,10 @@ bool motion_bias_result(const motion_bias_window_t *window, float *bias_dps);
 
 /** Envuelve un ángulo a (-180, 180] grados. */
 float motion_wrap_degrees(float degrees);
+/** Integra la pose del centro a partir de la velocidad aplicada en el eje desplazado. */
+void motion_integrate_axle_pose(float *col, float *row, float *theta_deg,
+                                float forward_cells_s, float angular_speed_dps,
+                                float axle_offset_cells, float dt_s);
 /** Calcula PWM diferencial de recta; salidas no nulas permanecen entre 700 y 1000. */
 void motion_drive_command(float heading_error_deg, float cross_track_cells,
                           float angular_speed_dps, float trim, int *left, int *right,

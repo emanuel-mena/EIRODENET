@@ -64,6 +64,13 @@ static float s_push_goal_col, s_push_goal_row;
 static float s_push_start_col, s_push_start_row;
 static uint64_t s_no_plan_log_ms;
 static uint8_t s_failed_stage_mask;
+static bool s_approach_only;
+static uint8_t s_intermediate_pushes;
+
+static const char *mission_kind(bool staged, bool approach_only)
+{
+    return approach_only ? "aproximacion" : (staged ? "intermedia" : "directa");
+}
 
 static uint64_t now_ms(void) { return (uint64_t)(esp_timer_get_time() / 1000); }
 static float length(float x, float y) { return hypotf(x, y); }
@@ -84,6 +91,67 @@ static bool delivered(const vision_status_t *v, uint8_t color)
     if (!cube_ready(v, color))
         return false;
     return v->cube_in_depot[color];
+}
+
+static bool mission_geometry_safe(const vision_status_t *v, const peer_mission_t *mission,
+                                  bool peer_start, const char *kind)
+{
+    if (!v || !mission) return false;
+    float col = peer_start ? v->peer_col : v->col;
+    float row = peer_start ? v->peer_row : v->row;
+    float heading = peer_start ? v->peer_theta_deg : v->theta_deg;
+    for (uint8_t i = 0; i < mission->point_count; ++i) {
+        const float next_col = mission->points[i].col;
+        const float next_row = mission->points[i].row;
+        const float dx = next_col - col, dy = next_row - row;
+        if (length(dx, dy) < 0.05f) continue;
+        const uint8_t direction = (uint8_t)fmodf(roundf(atan2f(-dy, dx) /
+                                                         0.7853981634f) + 8.0f, 8.0f);
+        const float forward_heading = 45.0f * direction;
+        bool safe = navigation_turn_inside_mm(col, row, heading,
+                                              forward_heading - heading,
+                                              v->grid_cols, v->grid_rows, v->cell_mm) &&
+            navigation_segment_inside_mm(col, row, next_col, next_row,
+                                         forward_heading, v->grid_cols, v->grid_rows,
+                                         v->cell_mm);
+        if (!safe) {
+            const float reverse_heading = forward_heading + 180.0f;
+            safe = navigation_turn_inside_mm(col, row, heading,
+                                             reverse_heading - heading,
+                                             v->grid_cols, v->grid_rows, v->cell_mm) &&
+                navigation_segment_inside_mm(col, row, next_col, next_row,
+                                             reverse_heading, v->grid_cols, v->grid_rows,
+                                             v->cell_mm);
+        }
+        if (!safe && i == 0) {
+            const float escape_heading = roundf(heading / 45.0f) * 45.0f;
+            const float radians = escape_heading * 0.01745329252f;
+            for (uint8_t half_steps = 1; half_steps <= 8 && !safe; ++half_steps) {
+                const float distance = 0.5f * half_steps;
+                const float escape_col = col + distance * cosf(radians);
+                const float escape_row = row - distance * sinf(radians);
+                if (!navigation_segment_inside_mm(col, row, escape_col, escape_row,
+                                                  escape_heading, v->grid_cols, v->grid_rows,
+                                                  v->cell_mm)) continue;
+                safe = navigation_turn_inside_mm(escape_col, escape_row, escape_heading,
+                                                 forward_heading - escape_heading,
+                                                 v->grid_cols, v->grid_rows, v->cell_mm) &&
+                    navigation_segment_inside_mm(escape_col, escape_row, next_col, next_row,
+                                                 forward_heading, v->grid_cols, v->grid_rows,
+                                                 v->cell_mm);
+            }
+        }
+        if (!safe) {
+            ESP_LOGW(TAG, "MISSION_REJECT cube=%u type=%s reason=pivot_or_envelope point=%u from=%.2f,%.2f to=%.2f,%.2f heading=%.0f",
+                     mission->color, kind, (unsigned)i, (double)col, (double)row,
+                     (double)next_col, (double)next_row, (double)heading);
+            return false;
+        }
+        col = next_col;
+        row = next_row;
+        heading = forward_heading;
+    }
+    return true;
 }
 
 static void mark_circle(uint8_t cols, uint8_t rows, float col, float row, float radius)
@@ -127,15 +195,42 @@ static bool plan_to(const vision_status_t *v, uint8_t color, bool peer_start,
     for (int sample = 0; sample <= samples; ++sample) {
         const float t = samples ? travel * sample / samples : 0;
         const float x = stage_col + t * dx / distance, y = stage_row + t * dy / distance;
-        if (!navigation_pose_inside(x, y, push_heading, v->grid_cols, v->grid_rows)) return false;
+        if (!navigation_pose_inside_mm(x, y, push_heading, v->grid_cols, v->grid_rows,
+                                       v->cell_mm)) {
+            ESP_LOGW(TAG, "MISSION_REJECT cube=%u type=%s reason=push_envelope sample=%d",
+                     color, staged ? "intermedia" : "directa", sample);
+            return false;
+        }
+        // The simulator reports a cube outside when any rotated corner leaves
+        // the board, so use the square's circumradius rather than its half
+        // side. This keeps the guard independent of the cube yaw.
+        const float cube_half = v->cube_side * CUBE_RADIUS_FACTOR;
+        const float contact_distance = fmaxf(0.0f, STAGE_DISTANCE - dock);
+        const float cube_progress = fminf(distance, fmaxf(0.0f, t - contact_distance));
+        const float cube_col = cx + cube_progress * dx / distance;
+        const float cube_row = cy + cube_progress * dy / distance;
+        if (cube_col - cube_half < 0.0f || cube_row - cube_half < 0.0f ||
+            cube_col + cube_half > v->grid_cols || cube_row + cube_half > v->grid_rows) {
+            ESP_LOGW(TAG, "MISSION_REJECT cube=%u type=%s reason=cube_edge sample=%d",
+                     color, staged ? "intermedia" : "directa", sample);
+            return false;
+        }
         for (uint8_t i = 0; i < v->obstacle_count; ++i)
             if (v->obstacles[i].age_ms <= FRESH_MS &&
                 length(x - v->obstacles[i].col, y - v->obstacles[i].row) <
-                    navigation_square_clearance(NAV_OBSTACLE_SIDE_CELLS)) return false;
+                    navigation_square_clearance(NAV_OBSTACLE_SIDE_CELLS)) {
+                ESP_LOGW(TAG, "MISSION_REJECT cube=%u type=%s reason=obstacle_corridor",
+                         color, staged ? "intermedia" : "directa");
+                return false;
+            }
         for (uint8_t i = 0; i < VISION_MAX_CUBES; ++i)
             if (i != color && cube_ready(v, i) &&
                 length(x - v->cubes[i].col, y - v->cubes[i].row) <
-                    navigation_square_clearance(v->cube_side)) return false;
+                    navigation_square_clearance(v->cube_side)) {
+                ESP_LOGW(TAG, "MISSION_REJECT cube=%u type=%s reason=cube_corridor other=%u",
+                         color, staged ? "intermedia" : "directa", i);
+                return false;
+            }
     }
     const uint8_t cols = v->grid_cols, rows = v->grid_rows;
     memset(s_occupied, 0, (size_t)cols * rows);
@@ -175,6 +270,8 @@ static bool plan_to(const vision_status_t *v, uint8_t color, bool peer_start,
     if (mission->id == 0)
         mission->id = ++s_next_id;
     mission->color = color;
+    const float lattice_offset_col = start_col - floorf(start_col);
+    const float lattice_offset_row = start_row - floorf(start_row);
     int last_dc = 0, last_dr = 0;
     for (uint16_t i = 1; i < s_grid_route.count; ++i)
     {
@@ -186,7 +283,7 @@ static bool plan_to(const vision_status_t *v, uint8_t color, bool peer_start,
                 return false;
             const grid_planner_cell_t cell = s_grid_route.cells[i - 1];
             mission->points[mission->point_count++] = (peer_mission_point_t){
-                cell.col + 0.5f, cell.row + 0.5f};
+                cell.col + lattice_offset_col, cell.row + lattice_offset_row};
         }
         last_dc = dc;
         last_dr = dr;
@@ -204,19 +301,19 @@ static bool plan_to(const vision_status_t *v, uint8_t color, bool peer_start,
         if (length(leg_col, leg_row) > 0.1f) {
             const float heading = roundf(atan2f(-leg_row, leg_col) *
                                          57.2957795f / 45.0f) * 45.0f;
-            const bool forward = navigation_pose_inside(previous.col, previous.row,
-                                                         heading, cols, rows) &&
-                                 navigation_pose_inside(stage_col, stage_row,
-                                                         heading, cols, rows);
-            const bool backward = navigation_pose_inside(previous.col, previous.row,
-                                                          heading + 180, cols, rows) &&
-                                  navigation_pose_inside(stage_col, stage_row,
-                                                          heading + 180, cols, rows);
+            const bool forward = navigation_pose_inside_mm(previous.col, previous.row,
+                                                            heading, cols, rows, v->cell_mm) &&
+                                 navigation_pose_inside_mm(stage_col, stage_row,
+                                                            heading, cols, rows, v->cell_mm);
+            const bool backward = navigation_pose_inside_mm(previous.col, previous.row,
+                                                             heading + 180, cols, rows, v->cell_mm) &&
+                                  navigation_pose_inside_mm(stage_col, stage_row,
+                                                             heading + 180, cols, rows, v->cell_mm);
             if (!forward && !backward) return false;
         }
     }
     mission->points[mission->point_count++] = (peer_mission_point_t){stage_col, stage_row};
-    return true;
+    return mission_geometry_safe(v, mission, peer_start, mission_kind(staged, false));
 }
 
 static bool plan(const vision_status_t *v, uint8_t color, bool peer_start,
@@ -310,6 +407,8 @@ void competition_runtime_reset(void)
     s_yielding = false;
     s_yield_count = 0;
     s_stage_push = false;
+    s_approach_only = false;
+    s_intermediate_pushes = 0;
     s_stage_retreat = false;
     s_push_goal_col = s_push_goal_row = 0;
     s_push_start_col = s_push_start_row = 0;
@@ -328,6 +427,8 @@ static void assign_initial(const vision_status_t *v)
 {
     if (s_assignment_ms && now_ms() - s_assignment_ms < 500) return;
     s_assignment_ms = now_ms();
+    s_stage_push = false;
+    s_approach_only = false;
     float best = INFINITY;
     peer_mission_t own = {0}, other = {0};
     for (uint8_t a = 0; a < VISION_MAX_CUBES; ++a)
@@ -388,14 +489,38 @@ static void assign_initial(const vision_status_t *v)
                 }
             }
             if (!isfinite(best)) {
-                if (!s_no_plan_log_ms || now_ms() - s_no_plan_log_ms >= 10000) {
-                    s_no_plan_log_ms = now_ms();
-                    ESP_LOGW(TAG, "Sin maniobra segura para los cubos pendientes");
+                // A bounded approach is still useful evidence for a difficult
+                // distribution. It never relaxes the body/edge/peer checks.
+                for (uint8_t c = 0; c < VISION_MAX_CUBES; ++c) {
+                    if ((s_failed_stage_mask & (1U << c)) ||
+                        !cube_ready(v, c) || delivered(v, c)) continue;
+                    peer_mission_t candidate = {};
+                    float goal_col = 0, goal_row = 0;
+                    if (!plan_stage(v, c, &candidate, &goal_col, &goal_row)) continue;
+                    const float cost = mission_length(v, &candidate, false);
+                    if (cost < best) {
+                        best = cost;
+                        own = candidate;
+                        other = {};
+                        s_push_goal_col = goal_col;
+                        s_push_goal_row = goal_row;
+                        s_approach_only = true;
+                    }
                 }
-                return;
+                if (!isfinite(best)) {
+                    if (!s_no_plan_log_ms || now_ms() - s_no_plan_log_ms >= 10000) {
+                        s_no_plan_log_ms = now_ms();
+                        ESP_LOGW(TAG, "MISSION_ABORT reason=no_safe_candidate pending_mask=0x%02x",
+                                 (unsigned)(~s_delivered_mask & ((1U << VISION_MAX_CUBES) - 1)));
+                    }
+                    return;
+                }
+                ESP_LOGI(TAG, "MISSION_SELECT cube=%u type=aproximacion points=%u",
+                         own.color, own.point_count);
+            } else {
+                ESP_LOGI(TAG, "MISSION_SELECT cube=%u type=intermedia points=%u",
+                         own.color, own.point_count);
             }
-            ESP_LOGI(TAG, "Empuje intermedio: cubo %u hacia %.2f, %.2f",
-                     own.color, (double)s_push_goal_col, (double)s_push_goal_row);
         }
     }
     if (!s_stage_push) s_push_goal_col = s_push_goal_row = 0;
@@ -410,7 +535,8 @@ static void assign_initial(const vision_status_t *v)
         ESP_LOGI(TAG, "READY: comandante cubo %u; soldado cubo %u",
                  own.color, other.color);
     else
-        ESP_LOGI(TAG, "READY: comandante cubo %u; soldado sin mision", own.color);
+        ESP_LOGI(TAG, "READY: comandante cubo %u tipo=%s; soldado sin mision",
+                 own.color, mission_kind(s_stage_push, s_approach_only));
 }
 
 static void send_remote(const vision_status_t *v)
@@ -491,7 +617,8 @@ static bool next_step_clear(const vision_status_t *v, uint8_t carried_color,
     const float radians = v->theta_deg * 0.01745329252f;
     const float x = v->col + step * cosf(radians);
     const float y = v->row - step * sinf(radians);
-    if (!navigation_pose_inside(x, y, v->theta_deg, v->grid_cols, v->grid_rows))
+    if (!navigation_segment_inside_mm(v->col, v->row, x, y, v->theta_deg,
+                                      v->grid_cols, v->grid_rows, v->cell_mm))
         return false;
     for (uint8_t i = 0; i < v->obstacle_count; ++i)
         if (v->obstacles[i].age_ms <= FRESH_MS &&
@@ -504,6 +631,18 @@ static bool next_step_clear(const vision_status_t *v, uint8_t carried_color,
                 navigation_square_clearance(v->cube_side))
             return false;
     return true;
+}
+
+static bool cube_push_step_clear(const vision_status_t *v, uint8_t color,
+                                 float step)
+{
+    if (color >= VISION_MAX_CUBES || !v->cube_valid[color]) return true;
+    const float radians = v->theta_deg * 0.01745329252f;
+    const float next_col = v->cubes[color].col + step * cosf(radians);
+    const float next_row = v->cubes[color].row - step * sinf(radians);
+    const float half = v->cube_side * CUBE_RADIUS_FACTOR;
+    return next_col - half >= 0.0f && next_row - half >= 0.0f &&
+           next_col + half <= v->grid_cols && next_row + half <= v->grid_rows;
 }
 
 static bool peer_blocks_step(const vision_status_t *v, float step)
@@ -584,17 +723,17 @@ static void execute_local(const vision_status_t *v)
             s_phase = EXEC_RETREAT;
             return;
         }
-        if (s_retries > 5) {
-            if (s_retries == 6) {
-                ESP_LOGW(TAG, "Cubo %u sin recuperacion segura tras seis intentos", color);
-                ++s_retries;
-                if (s_stage_push && !s_remote.id) {
-                    s_failed_stage_mask |= 1U << color;
-                    s_local = {};
-                    s_assigned_mask = 0;
-                    s_stage_push = false;
-                    s_phase = EXEC_WAIT;
-                }
+        if (s_retries >= 3) {
+            if (s_retries == 3) {
+                ESP_LOGW(TAG, "MISSION_ABORT cube=%u type=%s reason=attempt_limit attempts=%u",
+                         color, mission_kind(s_stage_push, s_approach_only), (unsigned)s_retries);
+                s_failed_stage_mask |= 1U << color;
+                s_local = {};
+                s_assigned_mask &= (uint8_t)~(1U << color);
+                s_stage_push = false;
+                s_approach_only = false;
+                s_phase = EXEC_WAIT;
+                s_assignment_ms = 0;
             }
             return;
         }
@@ -607,11 +746,13 @@ static void execute_local(const vision_status_t *v)
         peer_mission_t retry = {0};
         bool direct = plan(v, color, false, &retry);
         float goal_col = 0, goal_row = 0;
-        bool staged = !direct && plan_stage(v, color, &retry, &goal_col, &goal_row);
+        bool staged = !direct && s_intermediate_pushes < 3 &&
+                      plan_stage(v, color, &retry, &goal_col, &goal_row);
         if (direct || staged)
         {
             s_local = retry;
             s_stage_push = staged;
+            s_approach_only = false;
             s_push_goal_col = goal_col;
             s_push_goal_row = goal_row;
             s_point_index = 0;
@@ -668,6 +809,13 @@ static void execute_local(const vision_status_t *v)
         hold();
         return;
     }
+    if (s_phase == EXEC_PUSH && !cube_push_step_clear(v, color, 0.8f))
+    {
+        ESP_LOGW(TAG, "MISSION_REJECT cube=%u type=%s reason=cube_edge_runtime",
+                 color, mission_kind(s_stage_push, s_approach_only));
+        hold();
+        return;
+    }
     const bool opening = cube_in_opening(v, color);
     if (s_phase == EXEC_ALIGN)
     {
@@ -681,9 +829,11 @@ static void execute_local(const vision_status_t *v)
             return;
         }
         const float heading = navigation.pose_valid ? navigation.theta_deg : v->theta_deg;
-        if (!navigation_turn_inside(v->col, v->row, heading, align_error, v->grid_cols, v->grid_rows)) {
+        if (!navigation_turn_inside_mm(v->col, v->row, heading, align_error,
+                                       v->grid_cols, v->grid_rows, v->cell_mm)) {
             align_error += align_error > 0 ? -360.0f : 360.0f;
-            if (!navigation_turn_inside(v->col, v->row, heading, align_error, v->grid_cols, v->grid_rows)) {
+            if (!navigation_turn_inside_mm(v->col, v->row, heading, align_error,
+                                           v->grid_cols, v->grid_rows, v->cell_mm)) {
                 hold();
                 return;
             }
@@ -699,6 +849,17 @@ static void execute_local(const vision_status_t *v)
         motor_adapter_stop();
         if (++s_align_stable_samples < 3) return;
         s_align_stable_samples = 0;
+        if (s_approach_only) {
+            ESP_LOGI(TAG, "MISSION_ATTEMPT cube=%u type=aproximacion result=observed_no_push",
+                     color);
+            s_failed_stage_mask |= 1U << color;
+            s_local = {};
+            s_assigned_mask &= (uint8_t)~(1U << color);
+            s_approach_only = false;
+            s_phase = EXEC_WAIT;
+            s_assignment_ms = 0;
+            return;
+        }
         s_phase = EXEC_CAPTURE;
         s_capture_samples = 0;
         return;
@@ -793,13 +954,14 @@ static void execute_local(const vision_status_t *v)
                                    fmaxf(0.1f, length(sx, sy));
             if (progress >= 4.0f) {
                 motor_adapter_stop();
-                s_failed_stage_mask = 0;
+                if (s_intermediate_pushes < UINT8_MAX) ++s_intermediate_pushes;
                 s_retreat_col = v->col;
                 s_retreat_row = v->row;
                 s_stage_retreat = true;
                 s_phase = EXEC_RETREAT;
                 s_retries = 0;
-                ESP_LOGI(TAG, "Empuje intermedio terminado; observando cubo %u", color);
+                ESP_LOGI(TAG, "MISSION_ATTEMPT cube=%u type=intermedia push=%u result=stop_reobserve",
+                         color, (unsigned)s_intermediate_pushes);
                 return;
             }
         }
@@ -906,6 +1068,7 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation)
         {
             s_local = repair;
             s_stage_push = false;
+            s_approach_only = false;
             s_point_index = s_retries = 0;
             s_phase = EXEC_ROUTE;
         }
@@ -947,6 +1110,7 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation)
                 {
                     s_local = own_third;
                     s_stage_push = false;
+                    s_approach_only = false;
                     s_point_index = 0;
                     s_retries = 0;
                     s_phase = EXEC_ROUTE;
@@ -970,6 +1134,7 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation)
                 {
                     s_local = repair;
                     s_stage_push = false;
+                    s_approach_only = false;
                     s_point_index = s_retries = 0;
                     s_phase = EXEC_ROUTE;
                 }
@@ -986,6 +1151,7 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation)
             s_received_mission_id = received.id;
             s_local = received;
             s_stage_push = false;
+            s_approach_only = false;
             s_point_index = 0;
             s_retries = 0;
             s_phase = EXEC_WAIT;
@@ -1032,7 +1198,8 @@ void competition_runtime_tick(competition_role_t role, uint32_t generation)
             for (float step = 6.5f; step >= 3.0f; step -= 0.5f) {
                 const float x = v.col + step * dx / distance;
                 const float y = v.row + step * dy / distance;
-                if (!navigation_pose_inside(x, y, v.theta_deg, v.grid_cols, v.grid_rows))
+                if (!navigation_pose_inside_mm(x, y, v.theta_deg, v.grid_cols, v.grid_rows,
+                                               v.cell_mm))
                     continue;
                 navigation_service_set_competition_cube(s_local.color, false);
                 if (navigation_service_submit_competition(x, y, &s_nav_request) == ESP_OK) {

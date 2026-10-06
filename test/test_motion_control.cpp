@@ -58,10 +58,37 @@ int main(void)
     assert(motion_turn_pwm(2, 5, 0, &settled) == 0 && settled);
     assert(motion_turn_pwm(5, 0, 0, &settled) == 700 && !settled);
     assert(motion_turn_pwm(5, 0, 4, &settled) == 0 && !settled);
+    float col = 10.0f, row = 10.0f, theta = 0.0f;
+    motion_integrate_axle_pose(&col, &row, &theta, 0.0f, 90.0f,
+                               navigation_axle_offset_cells(20.0f), 1.0f);
+    assert(theta > 89.9f && theta < 90.1f);
+    assert(row < 10.0f && fabsf(col - 10.0f) > 0.1f);
+    col = row = 10.0f;
+    theta = 0.0f;
+    motion_integrate_axle_pose(&col, &row, &theta, 0.0f, -90.0f,
+                               navigation_axle_offset_cells(20.0f), 1.0f);
+    assert(theta < -89.9f && theta > -90.1f);
+    assert(row > 10.0f && fabsf(col - 10.0f) > 0.1f);
+    col = row = 10.0f;
+    theta = 0.0f;
+    motion_integrate_axle_pose(&col, &row, &theta, 1.0f, 0.0f,
+                               navigation_axle_offset_cells(20.0f), 1.0f);
+    assert(fabsf(col - 11.0f) < 0.001f && fabsf(row - 10.0f) < 0.001f);
+    float axle_col, axle_row, center_col, center_row;
+    navigation_axle_from_center(10.0f, 10.0f, 0.0f, 20.0f, &axle_col, &axle_row);
+    navigation_center_from_axle(axle_col, axle_row, 0.0f, 20.0f, &center_col, &center_row);
+    assert(fabsf(axle_col - 8.625f) < 0.001f && fabsf(axle_row - 10.0f) < 0.001f);
+    assert(fabsf(center_col - 10.0f) < 0.001f && fabsf(center_row - 10.0f) < 0.001f);
     assert(navigation_pose_inside(3.75f, 14, 0, 43, 43));
     assert(!navigation_pose_inside(3.75f, 14, 180, 43, 43));
     assert(navigation_turn_inside(3.75f, 14, 90, -180, 43, 43));
     assert(!navigation_turn_inside(3.75f, 14, 90, 180, 43, 43));
+    assert(!navigation_turn_inside_mm(3.75f, 14.0f, 0.0f, 90.0f, 43, 43, 20.0f));
+    assert(navigation_segment_inside_mm(3.75f, 14.0f, 4.25f, 14.0f,
+                                        0.0f, 43, 43, 20.0f));
+    assert(navigation_turn_inside_mm(4.25f, 14.0f, 0.0f, 90.0f, 43, 43, 20.0f));
+    assert(navigation_segment_inside_mm(4.25f, 14.0f, 4.25f, 13.0f,
+                                        90.0f, 43, 43, 20.0f));
     assert(navigation_rovers_overlap(20, 20, 0, 25, 20, 180));
     assert(!navigation_rovers_overlap(20, 20, 0, 20, 26, 0));
     return 0;
