@@ -21,7 +21,7 @@
 #include "vision_service.hpp"
 
 #define PEER_MAGIC 0x524f4952U
-#define PEER_PROTOCOL_VERSION 8U
+#define PEER_PROTOCOL_VERSION 9U
 #define PEER_STATE_PERIOD_MS 200U
 #define PEER_TIMEOUT_MS 1500U
 
@@ -40,6 +40,8 @@ typedef enum {
     PEER_MESSAGE_LOG = 12,
     PEER_MESSAGE_LOG_ACK = 13,
     PEER_MESSAGE_TARGET_ACK = 14,
+    PEER_MESSAGE_DELIVERY = 15,
+    PEER_MESSAGE_DELIVERY_ACK = 16,
 } peer_message_type_t;
 
 typedef struct {
@@ -105,6 +107,8 @@ typedef struct {
         } mission;
         struct { uint32_t id; uint8_t fragment, accepted; } mission_ack;
         struct { uint32_t nonce; uint8_t accepted, reason; } mode;
+        struct { uint32_t mission_id, timestamp_ms; uint8_t color; } delivery;
+        struct { uint32_t mission_id; uint8_t accepted; } delivery_ack;
         diagnostic_entry_t log;
         struct { uint32_t boot_id, sequence; } log_ack;
     } payload;
@@ -130,7 +134,7 @@ static peer_mission_t s_mission;
 static uint8_t s_mission_fragments;
 static uint8_t s_mission_next_fragment;
 static bool s_mission_complete;
-static uint32_t s_last_mode_nonce;
+static peer_delivery_event_t s_delivery_event;
 static uint32_t s_last_target_nonce;
 static uint32_t s_last_target_request_id;
 static esp_err_t s_last_target_error;
@@ -389,17 +393,10 @@ static void handle_received(const received_packet_t *received)
     }
     if (received->packet.type == PEER_MESSAGE_COMPETITION_ENTER) {
         const uint32_t nonce = received->packet.payload.mode.nonce;
-        uint8_t reason = 0;
-        bool accepted = nonce != 0 && s_last_mode_nonce == nonce &&
-            app_mode_get() == APP_MODE_COMPETITION;
-        if (!accepted) {
-            if (app_mode_get() != APP_MODE_TEST) reason = 1;
-            else if (!recent_vision(NULL)) reason = 2;
-            else if (app_mode_enter_competition() == ESP_OK) {
-                accepted = true;
-                s_last_mode_nonce = nonce;
-            } else reason = 1;
-        }
+        // Competition entry is deliberately local-only. A peer may verify the
+        // link, but it must never press BOOT on behalf of this rover.
+        const uint8_t reason = 3;
+        const bool accepted = false;
         peer_packet_t reply = {.type = PEER_MESSAGE_COMPETITION_ACK};
         reply.payload.mode.nonce = nonce;
         reply.payload.mode.accepted = accepted;
@@ -413,6 +410,33 @@ static void handle_received(const received_packet_t *received)
         s_status.mission_ack_fragment = received->packet.payload.mission_ack.fragment;
         s_status.mission_ack_accepted = received->packet.payload.mission_ack.accepted != 0;
         xSemaphoreGive(s_lock);
+        return;
+    }
+    if (received->packet.type == PEER_MESSAGE_DELIVERY) {
+        const auto *delivery = &received->packet.payload.delivery;
+        if (delivery->mission_id != 0 && delivery->color < VISION_MAX_CUBES) {
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            if (!s_delivery_event.valid ||
+                delivery->timestamp_ms < s_delivery_event.timestamp_ms ||
+                (delivery->timestamp_ms == s_delivery_event.timestamp_ms &&
+                 received->packet.source_id < s_delivery_event.rover_id)) {
+                s_delivery_event = (peer_delivery_event_t){
+                    .valid = true,
+                    .mission_id = delivery->mission_id,
+                    .color = delivery->color,
+                    .rover_id = received->packet.source_id,
+                    .timestamp_ms = delivery->timestamp_ms,
+                };
+            }
+            xSemaphoreGive(s_lock);
+            peer_packet_t reply = {.type = PEER_MESSAGE_DELIVERY_ACK};
+            reply.payload.delivery_ack.mission_id = delivery->mission_id;
+            reply.payload.delivery_ack.accepted = 1;
+            send_packet(&reply);
+        }
+        return;
+    }
+    if (received->packet.type == PEER_MESSAGE_DELIVERY_ACK) {
         return;
     }
     if (received->packet.type == PEER_MESSAGE_MISSION) {
@@ -709,6 +733,25 @@ bool peer_comms_service_get_mission(peer_mission_t *mission)
     return complete;
 }
 
+esp_err_t peer_comms_service_send_delivery(uint32_t mission_id, uint8_t color)
+{
+    if (mission_id == 0 || color >= VISION_MAX_CUBES) return ESP_ERR_INVALID_ARG;
+    peer_packet_t packet = {.type = PEER_MESSAGE_DELIVERY};
+    packet.payload.delivery.mission_id = mission_id;
+    packet.payload.delivery.color = color;
+    packet.payload.delivery.timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    return send_packet(&packet);
+}
+
+bool peer_comms_service_get_delivery_event(peer_delivery_event_t *event)
+{
+    if (event == NULL || s_lock == NULL) return false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *event = s_delivery_event;
+    xSemaphoreGive(s_lock);
+    return event->valid;
+}
+
 void peer_comms_service_reset_verification(void)
 {
     if (s_lock == NULL) return;
@@ -722,6 +765,7 @@ void peer_comms_service_reset_verification(void)
     s_mission_fragments = 0;
     s_mission_next_fragment = 0;
     s_mission_complete = false;
+    memset(&s_delivery_event, 0, sizeof(s_delivery_event));
     s_status.mission_ack_id = 0;
     s_status.mission_ack_fragment = 0;
     s_status.mission_ack_accepted = false;

@@ -16,6 +16,14 @@ typedef struct {
 } peer_mission_t;
 
 typedef struct {
+    bool valid;
+    uint32_t mission_id;
+    uint8_t color;
+    uint8_t rover_id;
+    uint32_t timestamp_ms;
+} peer_delivery_event_t;
+
+typedef struct {
     bool configured;
     bool initialized;
     bool connected;
@@ -108,3 +116,5 @@ esp_err_t peer_comms_service_probe_link(void);
 esp_err_t peer_comms_service_query_identity(void);
 esp_err_t peer_comms_service_send_mission_fragment(const peer_mission_t *mission, uint8_t fragment);
 bool peer_comms_service_get_mission(peer_mission_t *mission);
+esp_err_t peer_comms_service_send_delivery(uint32_t mission_id, uint8_t color);
+bool peer_comms_service_get_delivery_event(peer_delivery_event_t *event);

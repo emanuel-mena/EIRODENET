@@ -11,7 +11,6 @@
 
 #define APP_NVS_NAMESPACE "app"
 #define WHO_AM_I_KEY "WHO_AM_I"
-#define LOCAL_SITE_KEY "LOCAL_SITE"
 #define BOOT_COUNT_KEY "boot_count"
 #define WIFI_SSID_KEY "wifi_ssid"
 #define WIFI_PASSWORD_KEY "wifi_pass"
@@ -152,20 +151,6 @@ static bool valid_rover_identity(uint8_t who_am_i)
            who_am_i == APP_STORAGE_ROVER_10 || who_am_i == APP_STORAGE_ROVER_11;
 }
 
-static bool valid_local_site(const char *hostname)
-{
-    const size_t length = strlen(hostname);
-    if (length == 0) return true;
-    if (length > APP_STORAGE_LOCAL_SITE_MAX_LENGTH ||
-        !isalnum((unsigned char)hostname[0]) ||
-        !isalnum((unsigned char)hostname[length - 1])) return false;
-    for (size_t i = 0; i < length; ++i) {
-        const unsigned char character = (unsigned char)hostname[i];
-        if (!isalnum(character) && character != '-' && character != '_') return false;
-    }
-    return true;
-}
-
 esp_err_t app_storage_get_config(app_storage_config_t *config)
 {
     if (config == NULL) return ESP_ERR_INVALID_ARG;
@@ -176,19 +161,6 @@ esp_err_t app_storage_get_config(app_storage_config_t *config)
     err = nvs_get_u8(handle, WHO_AM_I_KEY, &config->who_am_i);
     if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
     if (err == ESP_OK && !valid_rover_identity(config->who_am_i)) err = ESP_ERR_INVALID_CRC;
-    if (err == ESP_OK) {
-        err = get_optional_string(handle, LOCAL_SITE_KEY, config->local_site,
-                                  sizeof(config->local_site));
-        if (err == ESP_ERR_NVS_TYPE_MISMATCH) {
-            uint8_t legacy_enabled = 0;
-            err = nvs_get_u8(handle, LOCAL_SITE_KEY, &legacy_enabled);
-            if (err == ESP_OK && legacy_enabled <= 1) {
-                if (legacy_enabled == 1) strcpy(config->local_site, "LOCAL_SITE");
-            } else if (err == ESP_OK) {
-                err = ESP_ERR_INVALID_CRC;
-            }
-        }
-    }
     if (err == ESP_OK) {
         err = get_optional_string(handle, WIFI_SSID_KEY, config->wifi_ssid, sizeof(config->wifi_ssid));
     }
@@ -234,7 +206,6 @@ esp_err_t app_storage_set_config(const app_storage_config_t *config)
     if (config == NULL || !valid_rover_identity(config->who_am_i) ||
         strlen(config->wifi_ssid) > APP_STORAGE_WIFI_SSID_MAX_LENGTH ||
         strlen(config->wifi_password) > APP_STORAGE_WIFI_PASSWORD_MAX_LENGTH ||
-        !valid_local_site(config->local_site) ||
         (config->server_configured &&
          (config->server_port == 0 || !ip4addr_aton(config->server_ipv4, &address))) ||
         (config->peer_configured && !valid_peer_mac(config->peer_mac))) {
@@ -249,7 +220,6 @@ esp_err_t app_storage_set_config(const app_storage_config_t *config)
     } else {
         err = nvs_set_u8(handle, WHO_AM_I_KEY, config->who_am_i);
     }
-    if (err == ESP_OK) err = nvs_set_str(handle, LOCAL_SITE_KEY, config->local_site);
     if (err == ESP_OK) err = nvs_set_str(handle, WIFI_SSID_KEY, config->wifi_ssid);
     if (err == ESP_OK) err = nvs_set_str(handle, WIFI_PASSWORD_KEY, config->wifi_password);
     if (err == ESP_OK && config->server_configured) {

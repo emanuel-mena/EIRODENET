@@ -3,7 +3,7 @@
 **EspressIdea Rover Delivery Network** es el firmware ESP-IDF del rover construido
 para el [Vision Rover Challenge](https://github.com/Universidad-Cenfotec/Vision-Rover-Challenge).
 La aplicación integra movimiento diferencial, percepción local, conectividad Wi-Fi,
-preferencias persistentes y un sitio web estático servido desde la propia placa.
+preferencias persistentes y telemetría serial para configuración y diagnóstico.
 
 El proyecto utiliza PlatformIO sobre una CRCibernética IdeaBoard con ESP32-WROOM-32E
 y flash de 8 MB. Su punto de entrada es `src/main.cpp`; el hardware se consume mediante
@@ -61,13 +61,12 @@ resistencias pull-up/pull-down internas.
 | IMU adapter | `imu_adapter.hpp` | Interfaz singleton configurada desde el mapa de pines |
 | Driver IMU | `lsm6ds3tr_c.hpp` | Registros I2C, identificación y conversión física |
 | Motores | `motor_adapter.hpp` | PWM independiente, sentido y parada segura |
-| Sitio local | `local_site_service.hpp` | Montaje SPIFFS, HTTP y anuncio mDNS |
 | Servicios | `rover_service.hpp` | Muestreo concurrente, calibración y fusión de orientación |
 | Serial | `serial_protocol.hpp` | Configuración y telemetría NDJSON sobre UART0 |
 | Modos | `app_mode.hpp` | Cambio con BOOT e indicador NeoPixel de prueba/competencia |
 | Navegación | `navigation_service.hpp` | Fusión visión/IMU/cuadrícula y control punto a punto en núcleo 1 |
-| Control manual | `manual_control_service.hpp` | Comandos web con parada de seguridad a 500 ms |
-| Competencia | `competition_service.hpp` | Verificación de red, identidad y función antes de la estrategia autónoma |
+| Control manual | `manual_control_service.hpp` | Comandos seriales con parada de seguridad a 500 ms |
+| Competencia | `competition_service.hpp` | BOOT local, preflight, verificación y estrategia autónoma |
 | Comunicación par | `peer_comms_service.hpp` | Telemetría y comandos entre rovers mediante ESP-NOW |
 
 Todas las APIs públicas incluyen documentación JavaDoc/Doxygen con parámetros,
@@ -110,14 +109,13 @@ $env:EIRO_PORT = "PUERTO_SERIAL"
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" device monitor --port $env:EIRO_PORT --baud 115200
 ```
 
-Una carga normal con el objetivo `upload` ejecuta el build de Vite, genera la imagen
-SPIFFS y escribe firmware y sitio web en la misma operación. Node.js y npm deben
-estar disponibles en el equipo de desarrollo.
+Una carga normal con el objetivo `upload` escribe únicamente el firmware y la
+partición de aplicación. La configuración y el diagnóstico se realizan por UART.
 
 ## Diagnóstico de arranque
 
 `app_main()` inicializa los motores en cero antes que el resto del hardware, abre
-NVS e inicia los servicios de sensores, Wi-Fi, sitio local y protocolo serial.
+NVS e inicia los servicios de sensores, Wi-Fi, visión, ESP-NOW y protocolo serial.
 El IMU se adquiere a 100 Hz; la telemetría solicitada por la GUI se publica a 20 Hz,
 5 Hz y 1 Hz según el tema. Un sensor ausente no impide el funcionamiento
 de los demás módulos. El monitor serie utiliza 115200 baudios.
@@ -129,7 +127,7 @@ calibrarse antes de usarlo para navegación inercial acumulativa.
 ## Aplicación de configuración y diagnóstico
 
 La aplicación de escritorio permite editar SSID, contraseña, IPv4/puerto del
-servidor, MAC del rover compañero y la preferencia `LOCAL_SITE`. También muestra valores y gráficas de 60
+servidor y MAC del rover compañero. También muestra valores y gráficas de 60
 segundos para todos los sensores, el estado Wi-Fi y el modelo tridimensional
 `tools/assets/Mini Rover.glb` orientado con el IMU.
 
@@ -159,12 +157,6 @@ del propio rover. La preferencia `WHO_AM_I` identifica persistentemente la placa
 como Rover 10 o Rover 11. Al cambiar las credenciales la placa confirma NVS y
 reconecta la
 estación Wi-Fi sin reiniciar el resto del firmware.
-
-`LOCAL_SITE` guarda el hostname mDNS propio de cada rover. Por ejemplo, los valores
-`rover-10` y `rover-11` publican `http://rover-10.local` y
-`http://rover-11.local` sin conflictos. Un valor vacío desactiva el sitio. Cuando
-está configurado, la placa monta `static`, inicia HTTP en el puerto 80 y anuncia el
-nombre guardado. El equipo cliente debe estar en la misma red y soportar mDNS.
 
 ### Calibración IMU de seis caras
 
@@ -263,157 +255,38 @@ El servidor iniciado por la herramienta se cierra al salir; `--keep-server` lo
 conserva. Un servidor que ya existía nunca se termina. Para pruebas sin cámara se
 puede agregar `--synthetic`; `--no-start` exige que el servidor ya esté activo.
 
-## Sitio web local
+## Estrategia autónoma de competencia
 
-`partitions.csv` reserva la partición de aplicación `factory` desde `0x20000`, con
-`0x5E0000` bytes, y la partición SPIFFS `static` en `0x600000`, con 2 MiB. El
-proyecto Vite vanilla está en `web/` y genera sus archivos optimizados en `data/`.
-`tools/build_web.py` se ejecuta como script previo de PlatformIO al cargar firmware,
-compila la página, crea `.pio/build/esp32dev/spiffs.bin` y la agrega a la misma
-operación de escritura. Para desarrollo aislado de la interfaz:
+El firmware siempre inicia en modo prueba. Sólo una pulsación local de BOOT cambia a
+competencia; una orden ESP-NOW remota nunca puede activar ese cambio. Cada transición
+detiene los motores. Antes de declarar READY, el rover ejecuta un preflight no
+bloqueante: avanza a PWM 1000 durante un segundo, integra la deriva de yaw, calcula
+trim diferencial manteniendo un motor en 1000, vuelve al origen por tiempo, repite el
+avance con trim, valida cambios de patrón IR estables durante dos lecturas, compara
+la velocidad IR con la IMU y vuelve al origen. Un fallo de IMU, IR o deriva bloquea
+la competencia. La consigna de media potencia es 700/1000.
 
-```powershell
-cd web
-npm install
-npm run dev
-```
+La competencia espera READY y sólo mueve motores en RUNNING. El comandante asigna
+el cubo más cercano a su posición y el soldado el más lejano; el tercero queda
+reservado. El primer rover que confirma una entrega publica un evento ESP-NOW con
+identificador, color y tiempo; el comandante arbitra por tiempo y luego por ID y
+reasigna el cubo restante. Las notificaciones se repiten de forma idempotente.
 
-La página sólo se conecta por HTTP al rover que la sirve, sin asumir nombres como
-`rover-10.local` o `rover-11.local`. Ese rover expone su propio estado y actúa como
-puente hacia el compañero mediante ESP-NOW y la MAC guardada en `peer_mac`. Ambos
-rovers publican un paquete binario de estado ESP-NOW v8 cada 200 ms, incluida la
-ruta discreta; tras 1500 ms sin paquetes,
-el panel del compañero se marca desconectado y bloquea telemetría y comandos. Por
-eso se puede abrir, por ejemplo, `http://cecilio.local` y operar ambos paneles sin
-que el navegador conozca la URL o IP del segundo rover.
+La navegación de competencia es directa: gira con la IMU al objetivo y avanza a la
+mayor velocidad. Un obstáculo ultrasónico a 3 cm o menos sólo desvía si el cubo está
+a más de 5 celdas: gira 60 grados a la derecha, avanza 7 celdas y recalcula el
+rumbo. Para el acople gira y avanza con consigna 700, se detiene a 6 celdas y
+empuja a 700 hasta la confirmación del servidor. Ante un solapamiento previsto entre
+rovers, el comandante se detiene y el soldado conserva su movimiento durante un
+segundo; si el solapamiento persiste, el soldado retrocede con consigna 700 hasta
+liberar la envolvente. Si el soldado no progresa más de una celda durante tres
+segundos, se detiene cinco segundos y reanuda. La planificación de cuadrícula
+permanece disponible para pruebas, pero no participa en competencia.
 
-El botón «Entrar en competencia» se habilita cuando ambos rovers están en modo
-prueba, el enlace ESP-NOW está activo y cada rover recibió una trama válida del
-servidor de visión durante los últimos 750 ms. `POST /api/v1/competition/enter`
-repite la validación en el anfitrión, solicita el cambio al compañero por ESP-NOW
-v8 y espera su confirmación antes de cambiar el modo local. Una orden rechazada
-indica el rover y la condición fallida. Si sólo uno cambió, la web indica el estado
-mixto para corregirlo con BOOT. BOOT sigue permitiendo cambiar de modo; la web sólo
-permite entrar. Cada cambio detiene motores y cancela navegación.
-
-El panel de diagnóstico muestra el último mensaje `ESP_LOG` de cada rover y guarda
-las últimas 100 líneas por rover en el almacenamiento local del navegador. El
-firmware conserva 24 líneas recientes por rover en RAM y las expone mediante
-`GET /api/v1/diagnostics` y `GET /api/v1/peer/diagnostics`, con identificador de
-arranque, secuencia, tiempo de actividad y motivo de reinicio. Los mensajes del
-compañero cruzan ESP-NOW en paquetes separados. Una caída súbita puede impedir que
-llegue la última línea o el volcado de pánico; se conserva el contexto recibido
-antes del fallo y se muestra el motivo del siguiente arranque.
-
-### Estado esperado al entrar en competencia
-
-Coloque ambos rovers cerca de la salida publicada por el servidor, en el centro
-del lado izquierdo de la cancha efectiva. Deben estar apoyados sobre la cuadrícula,
-quietos y con el frente alineado con el eje `col`, apuntando hacia el interior: en el
-contrato v3 esto es `theta = 0°`, dirección de `col` creciente. Mantenga visibles
-los marcadores ArUco de ambos rovers y no los mueva mientras se toman las cinco
-capturas de calibración. La corrección supone esa orientación física; si un rover
-está inclinado al entrar, el desfase calculado incorporará esa inclinación como
-si fuera un error del sistema de visión.
-
-Antes de pulsar BOOT o usar el botón web, configure en cada rover su identidad (10 u 11), la MAC del
-compañero, Wi-Fi y la dirección del servidor de visión v3. Ambos deben usar el
-mismo firmware ESP-NOW v8. El servidor debe ver la cancha y los marcadores y
-llegar a `READY` con tiempo para completar la verificación y las cinco capturas.
-La IMU debe estar calibrada y los infrarrojos operativos para que después se
-acepten objetivos de navegación. Al entrar en competencia el firmware detiene los
-motores. Manténgalos quietos hasta que termine el intento de calibración (máximo
-tres segundos desde que comienza en `READY`) y compruebe
-`navigation.pose.vision_heading_calibrated` o el registro serie. Tras el intento,
-el NeoPixel fijo indica calibración válida y el parpadeo del color de identidad
-indica que continúa sin ella.
-
-Al entrar en modo competencia, cada rover comprueba Wi-Fi con IPv4, espera hasta
-cinco segundos una trama válida del servidor TCP configurado, confirma el enlace ESP-NOW en cinco segundos y consulta
-`WHO_AM_I` del compañero en otros cinco segundos. Las identidades deben ser Rover
-10 y Rover 11. Cada placa compara localmente su MAC STA con la MAC configurada del
-compañero como enteros de 48 bits: la mayor es comandante y la menor soldado. Hasta
-terminar la verificación los motores permanecen detenidos. Un fallo queda fijado
-hasta salir y volver a entrar en competencia; el NeoPixel integrado muestra tantos
-destellos rojos como el paso fallido (1 a 5), de 200 ms encendido y 200 ms apagado,
-con un segundo de pausa entre grupos. En éxito conserva ámbar para Rover 10 y
-violeta para Rover 11. El estado HTTP expone `competition_check` con paso, error,
-resultado y función.
-
-Durante la primera fase `READY` posterior a esa verificación, cada rover permanece
-detenido hasta tres segundos para reunir cinco poses propias frescas con capturas
-distintas. Si está quieto y mirando desde la salida del lado izquierdo hacia el
-interior, calcula una sola vez el desfase entre el rumbo visual medio y 0 grados.
-Lo aplica únicamente a la orientación, lo comunica al compañero en el estado
-ESP-NOW y lo muestra en `navigation.pose` como `vision_heading_offset_deg` y
-`vision_heading_calibrated`. Si faltan muestras, varían demasiado o termina
-`READY`, continúa con el rumbo del servidor y `vision_heading_calibrated=false`.
-En ese caso, el NeoPixel parpadea a 1 Hz en el color de identidad del rover
-(ámbar para Rover 10, violeta para Rover 11); una calibración válida lo deja fijo.
-Los destellos rojos siguen reservados para fallos de verificación.
-
-| Destellos rojos por grupo | Paso fallido | Qué significa y qué revisar |
-|---:|---|---|
-| 1 | Wi-Fi | El rover no obtuvo conexión con dirección IPv4 en 15 segundos. Revise las credenciales, el punto de acceso y la asignación de IP. |
-| 2 | Datos del servidor | No llegó una trama válida del servidor TCP en 5 segundos. Revise `server_ipv4`, `server_port`, la conexión de red y el contrato v3. No se requiere que el servidor responda a ping. |
-| 3 | Enlace ESP-NOW | No llegó la respuesta del compañero en 5 segundos. Revise su alimentación, la MAC `peer_mac`, el canal Wi-Fi y que ambos tengan el protocolo ESP-NOW v8. |
-| 4 | `WHO_AM_I` | No llegó la identidad en 5 segundos, es inválida o coincide con la propia. Configure uno como Rover 10 y el otro como Rover 11. |
-| 5 | Comparación de MAC | No se pudo leer la MAC STA propia, falta la MAC del compañero o ambas son iguales. Revise `peer_mac` en la configuración. |
-
-Los grupos se repiten hasta salir del modo competencia. La luz permanece apagada
-durante las comprobaciones y vuelve al azul pulsante al entrar en modo prueba.
-
-En modo prueba la web muestra IMU, sensores, red, la pose fusionada y una flecha 3D
-de Three.js. Permite control diferencial directo y acepta objetivos decimales `(col, row)`
-para navegación sobre una ruta A* de ocho direcciones. Los comandos destinados al compañero atraviesan ESP-NOW y se validan
-otra vez en el rover receptor. En modo competencia los controles manuales quedan
-deshabilitados.
-
-La navegación exige primero una pose v3 fresca del servidor configurado, una IMU
-calibrada y una lectura válida de infrarrojos. Si falta cualquiera de estas
-precondiciones, la API rechaza el objetivo sin activar los motores. Un objetivo puede
-quedar aceptado durante un timeout ultrasónico, pero los motores permanecen detenidos
-hasta recuperar una lectura válida. Después
-predice a 100 Hz con el giroscopio y usa los cuatro TCRT5000 para confirmar cruces sobre la
-cuadrícula cuyo `cell_mm` publica visión; aprende automáticamente los dos niveles de cada sensor y su
-polaridad, pero un patrón infrarrojo nunca sustituye directamente la pose continua. Las
-retransmisiones con el mismo `ts_ms` no se vuelven a fusionar como si
-fueran capturas nuevas y la pose caduca después de 750 ms sin una captura nueva.
-Patrones ambiguos no corrigen la pose. El planificador evita obstáculos visuales y al
-otro rover, mantiene rumbos múltiplos de 45 grados y no corta esquinas bloqueadas. Si
-el servidor publica obstáculos, se modelan como bloques de 5 celdas de lado; los cubos
-usan `cube_side` (3 celdas en esta edición) y cada rover mide 5 por 7.5 celdas. Las
-zonas ocupadas incluyen el cuerpo del rover y 0.4 celdas de holgura, sin bloquear
-una franja adicional junto al borde. Las órdenes al compañero reciben confirmación
-de aceptación por ESP-NOW; la web muestra la causa de espera, bloqueo o error. Si
-cae la visión continúa como máximo dos cruces confirmados con la cuadrícula calibrada;
-después se detiene y replantea al recuperar una captura. La celda visual usa 0.12
-celdas de histéresis en cada frontera y la ruta conserva el desplazamiento fraccional
-inicial, por lo que no ordena ir al centro antes de comenzar A*. Dentro de tres
-celdas del waypoint el avance se aplica en pulsos de 40 ms sincronizados con capturas
-nuevas, y la llegada exige cinco capturas frescas dentro de 0.4 celdas con velocidad
-menor o igual a 0.35 celdas/s. Un obstáculo
-ultrasónico a 150 mm, un fallo de IMU/IR, tres lecturas ultrasónicas inválidas
-consecutivas, un cambio de modo o un mando manual detienen y cancelan el movimiento;
-una lectura ultrasónica inválida aislada sólo lo pausa. Se puede detener explícitamente
-con `POST /api/v1/navigation/cancel`.
-
-El firmware siempre inicia en modo prueba. Una pulsación de BOOT alterna entre
-prueba y competencia y detiene los motores. GPIO2 pulsa en azul durante prueba; en
-competencia queda amarillo para Rover 10 y morado para Rover 11. Una identidad sin
-configurar se señala en rojo. En competencia, el comandante espera `READY`, toma
-poses, cubos y depósitos frescos y asigna un cubo a cada rover. Envía al soldado
-una ruta fragmentada por ESP-NOW y espera confirmación de cada fragmento. Los
-motores permanecen detenidos hasta `RUNNING`. Cada rover navega hacia un punto
-detrás de su cubo, se alinea y lo introduce entre los brazos con pulsos lentos.
-El acoplo exige tres lecturas ultrasónicas de 30 mm o menos, o tres timeouts
-acompañados de una posición visual fresca del cubo dentro de la abertura.
-Después empuja hacia el centro del depósito de su color, confirma durante cinco
-capturas nuevas que el cubo completo quedó dentro y retrocede antes de girar.
-Al completarse la primera
-entrega, el comandante asigna el tercer cubo al rover libre con la ruta de
-aproximación más corta. La navegación de prueba sigue usando sus controles
-manuales, que permanecen deshabilitados en competencia.
+La configuración y el diagnóstico se conservan por UART a 115200 baudios mediante
+	ools/rover_gui y 	ools/rover_cli.py. La telemetría serial expone la fase de
+preflight, trim, velocidades IR/IMU, objetivo directo, distancia restante, desvío
+ultrasónico, estado de entrega y pausa del soldado.
 
 ## Estructura del repositorio
 
@@ -422,9 +295,8 @@ include/                 APIs documentadas y mapa de pines
 src/adapters/            Adaptación de sensores, red y actuadores
 src/lsm6ds3tr_c/         Driver I2C del IMU
 src/storage/             Preferencias persistentes NVS
-src/services/            Lógica concurrente y servidor del sitio local
-web/                     Proyecto Vite vanilla del sitio embebido
-tools/                   GUI, CLI y automatización del build web
+src/services/            Lógica concurrente de sensores, visión y competencia
+tools/                   GUI, CLI y herramientas de visión
 partitions.csv           Distribución de la flash de 8 MB
 platformio.ini           Entorno de compilación y carga
 ```
@@ -435,12 +307,3 @@ Mantenga el rover suspendido cuando pruebe motores, empiece con una magnitud baj
 termine siempre con `motor_adapter_stop()`. No alimente GPIO del ESP32 con 5 V. Los
 pines GPIO12 y GPIO15 participan en el arranque del ESP32, por lo que el puente H no
 debe forzar niveles incompatibles durante reset.
-
-## Simulaci�n de los dos rovers en PC
-
-El simulador ejecuta los m�dulos C++ reales de navegaci�n y competencia en dos procesos,
-con f�sica 2D de chasis, brazos r�gidos y cubos. Incluye ventana interactiva, ejecuci�n sin
-ventana, escenarios de fallos y reproducci�n exacta de las entradas del controlador.
-Los brazos tienen 3 mm de ancho, sobresalen 55 mm y dejan 94 mm libres entre ellos.
-
-Preparaci�n, l�mites del modelo y comandos: [gu�a del simulador](tools/rover_sim/README.md).

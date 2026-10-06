@@ -1456,7 +1456,6 @@ void navigation_service_tick(void)
     previous_ms = now_ms;
 }
 
-#ifndef EIRO_HOST_SIM
 static void navigation_task(void *argument)
 {
     (void)argument;
@@ -1467,18 +1466,13 @@ static void navigation_task(void *argument)
         vTaskDelayUntil(&wake, pdMS_TO_TICKS(NAV_PERIOD_MS));
     }
 }
-#endif
 
 esp_err_t navigation_service_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
     if (s_lock == NULL) return ESP_ERR_NO_MEM;
-    #ifdef EIRO_HOST_SIM
-    return ESP_OK;
-    #else
     return xTaskCreatePinnedToCore(navigation_task, "navigation", 7168, NULL, 6,
                                    NULL, 1) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
-    #endif
 }
 
 static esp_err_t navigation_service_submit_internal(float col, float row,

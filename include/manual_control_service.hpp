@@ -10,7 +10,7 @@ typedef struct {
     bool watchdog_armed;
 } manual_control_status_t;
 
-/** Inicia la parada de seguridad de comandos web. */
+/** Inicia la parada de seguridad de comandos seriales. */
 esp_err_t manual_control_service_start(void);
 
 /** Aplica un comando por un máximo de 500 ms; sólo es válido en modo prueba. */
