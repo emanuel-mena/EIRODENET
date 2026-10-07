@@ -342,6 +342,34 @@ def test_cube_displacement_uses_forward_when_reverse_exits_field(tmp_path,host_e
     assert records[end]['outputs'][1]['phase'] == 12
 
 
+def test_carried_cube_detours_away_from_blocking_cube(tmp_path,host_exe):
+    sim = Simulation(scenario(),tmp_path/'carried-detour',host_exe)
+    try:
+        for _ in range(1000):
+            sim.step()
+    finally:
+        sim.close()
+    records = [json.loads(line) for line in
+               (tmp_path/'carried-detour/trace.ndjson').read_text().splitlines()]
+    detour = next(i for i,row in enumerate(records)
+                  if row['outputs'][1]['phase'] == 18)
+    assert any(row['outputs'][1]['phase'] == 19 for row in records[detour+1:])
+    vision = next(row['inputs'][1]['vision'] for row in reversed(records[:detour+1])
+                  if row['inputs'][1]['vision'])
+    rover = next(item for item in vision['rovers'] if item['id'] == 11)
+    depot = next(item for item in vision['depots'] if item['color'] == 'red')
+    base = math.degrees(math.atan2(rover['row']-depot['row'],
+                                   depot['col']-rover['col']))
+    target = records[detour]['outputs'][1]['detour_heading_deg']
+    error = (target-base+180)%360-180
+    assert math.isclose(abs(error),60,abs_tol=1)
+    blocker = next(item for item in vision['cubes'] if item['color'] == 'blue')
+    radians = math.radians(base)
+    blocker_left = (-(blocker['col']-rover['col'])*math.sin(radians)
+                    -(blocker['row']-rover['row'])*math.cos(radians))
+    assert error*blocker_left < 0
+
+
 def test_delivery_retreat_faces_rear_to_center_then_reverses(tmp_path,host_exe):
     sim = Simulation(scenario(),tmp_path/'delivery-retreat',host_exe)
     try:

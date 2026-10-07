@@ -29,6 +29,11 @@ int main(void)
     assert(competition_stopping_distance(9.0f) > competition_stopping_distance(4.5f));
     assert(competition_stopping_distance(9.0f) > 2.0f);
     assert(COMPETITION_DETOUR_CELLS == 7.0f);
+    assert(COMPETITION_DEPOT_DETOUR_CELLS == 5.0f);
+    assert(fabsf(competition_depot_detour_heading(10, 10, 40, 10, 20, 7)
+                 + 60.0f) < 0.01f);
+    assert(fabsf(competition_depot_detour_heading(10, 10, 40, 10, 20, 13)
+                 - 60.0f) < 0.01f);
     assert(COMPETITION_DEPOT_APPROACH_CELLS == 2.5f);
     assert(competition_depot_needs_correction(2.5001f));
     assert(!competition_depot_needs_correction(2.5f));

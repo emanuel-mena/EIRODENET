@@ -44,6 +44,9 @@ typedef enum {
     EXEC_REVERSE_TO_CENTER = 15,
     EXEC_PUSH_WAIT_VISION = 16,
     EXEC_VERIFY_DEPOT_ALIGNMENT = 17,
+    EXEC_DEPOT_DETOUR_TURN = 18,
+    EXEC_DEPOT_DETOUR_ADVANCE = 19,
+    EXEC_DEPOT_BLOCKED_WAIT = 20,
 } exec_phase_t;
 
 static const char *TAG = "competition_run";
@@ -101,9 +104,6 @@ static uint32_t s_reposition_driven_ms;
 static uint64_t s_center_reverse_last_drive_ms;
 static uint32_t s_center_reverse_driven_ms;
 static bool s_first_delivery_retreat;
-static int8_t s_capture_turn_direction;
-static bool s_capture_turn_chosen;
-static bool s_last_cube_turn_near_goal;
 static bool s_cube_straight_active;
 static bool s_cube_held;
 static float s_cube_straight_start_col;
@@ -235,9 +235,6 @@ static peer_mission_t mission_for(const vision_status_t *v, uint8_t color)
 static void begin_local_mission(const peer_mission_t *mission)
 {
     if (mission == NULL || mission->id == 0) return;
-    s_capture_turn_direction = 0;
-    s_capture_turn_chosen = false;
-    s_last_cube_turn_near_goal = false;
     s_local = *mission;
     s_assigned_mask |= (uint8_t)(1U << mission->color);
     s_phase = EXEC_WAIT;
@@ -372,20 +369,11 @@ static void send_remote(void)
 }
 
 static bool turn_to(const vision_status_t *v, float target, int max_pwm,
-                    bool half_speed = false, int direction = 0)
+                    bool half_speed = false)
 {
     rover_imu_state_t imu = {};
     rover_service_get_imu(&imu);
-    const float shortest_error = heading_error(target, current_heading(v));
-    float error = shortest_error;
-    if (direction != 0 && !s_last_cube_turn_near_goal) {
-        error = direction > 0 ? fmodf(shortest_error + 360.0f, 360.0f)
-                              : -fmodf(360.0f - shortest_error, 360.0f);
-        if (fabsf(error) <= 15.0f) {
-            s_last_cube_turn_near_goal = true;
-            error = shortest_error;
-        }
-    }
+    const float error = heading_error(target, current_heading(v));
     bool settled = false;
     const uint32_t tick = (uint32_t)(now_ms() / 10U);
     const int pwm = motion_turn_pwm(error,
@@ -412,36 +400,6 @@ static bool turn_to(const vision_status_t *v, float target, int max_pwm,
     motor_adapter_set(error > 0 ? -magnitude : magnitude,
                       error > 0 ? magnitude : -magnitude);
     return false;
-}
-
-static int8_t capture_turn_direction(const vision_status_t *v, uint8_t target_color)
-{
-    const float cell_mm = navigation_cell_mm(v->cell_mm);
-    float axle_col, axle_row;
-    navigation_axle_from_center(v->col, v->row, current_heading(v), cell_mm,
-                                &axle_col, &axle_row);
-    // The circle encloses the outer arm tips and the carried cube about the
-    // actual motor axle, with 10 mm of clearance.
-    const float arm_radius_mm = hypotf(130.0f, 50.0f);
-    const float cube_radius_mm = distance(axle_col, axle_row,
-                                          v->cubes[target_color].col,
-                                          v->cubes[target_color].row) * cell_mm +
-                                 v->cube_side * cell_mm * 0.70710678f;
-    const float radius_cells = (fmaxf(arm_radius_mm, cube_radius_mm) + 10.0f) / cell_mm;
-    competition_turn_obstacle_t nearby[VISION_MAX_OBSTACLES + VISION_MAX_CUBES + 1] = {};
-    size_t count = 0;
-    for (uint8_t color = 0; color < VISION_MAX_CUBES; ++color) {
-        if (color == target_color || !v->cube_valid[color] ||
-            v->cubes[color].age_ms > FRESH_MS) continue;
-        nearby[count++] = {v->cubes[color].col, v->cubes[color].row};
-    }
-    if (v->peer_valid && v->peer_age_ms <= FRESH_MS)
-        nearby[count++] = {v->peer_col, v->peer_row};
-    for (uint8_t i = 0; i < v->obstacle_count && i < VISION_MAX_OBSTACLES; ++i)
-        if (v->obstacles[i].age_ms <= FRESH_MS)
-            nearby[count++] = {v->obstacles[i].col, v->obstacles[i].row};
-    return (int8_t)competition_capture_turn_direction(
-        axle_col, axle_row, current_heading(v), radius_cells, nearby, count);
 }
 
 static void direct_drive(const vision_status_t *v, float target_col, float target_row,
@@ -525,6 +483,149 @@ static bool cube_push_is_safe(const vision_status_t *v, uint8_t color)
     const float dy = v->cubes[color].row - v->row;
     return competition_cube_push_safe(v->cubes[color].col, v->cubes[color].row,
                                       dx, dy, v->grid_cols, v->grid_rows);
+}
+
+static bool carried_pose_clear(const vision_status_t *v, uint8_t color,
+                               float col, float row, float heading,
+                               float *blocker_col = nullptr,
+                               float *blocker_row = nullptr)
+{
+    if (!navigation_pose_inside_mm(col, row, heading, v->grid_cols,
+                                   v->grid_rows, v->cell_mm)) return false;
+    // Project the observed cube offset with the rover. It is carried in front
+    // of the arms, so the arm envelope alone does not cover its swept path.
+    const float current_rad = current_heading(v) * 0.01745329252f;
+    const float dx = v->cubes[color].col - v->col;
+    const float dy = v->cubes[color].row - v->row;
+    const float forward = dx * cosf(current_rad) - dy * sinf(current_rad);
+    const float lateral = dx * sinf(current_rad) + dy * cosf(current_rad);
+    const float radians = heading * 0.01745329252f;
+    const float cube_col = col + forward * cosf(radians) + lateral * sinf(radians);
+    const float cube_row = row - forward * sinf(radians) + lateral * cosf(radians);
+    const float cube_radius = v->cube_side * 0.7071067812f;
+    const float margin_col = navigation_workspace_margin_cells(v->grid_cols, v->cell_mm);
+    const float margin_row = navigation_workspace_margin_cells(v->grid_rows, v->cell_mm);
+    if (cube_col < cube_radius - margin_col ||
+        cube_col > v->grid_cols + margin_col - cube_radius ||
+        cube_row < cube_radius - margin_row ||
+        cube_row > v->grid_rows + margin_row - cube_radius) return false;
+    for (uint8_t i = 0; i < v->obstacle_count; ++i)
+        if (v->obstacles[i].age_ms <= FRESH_MS && (
+            !navigation_rover_clear_of_square(col, row, heading,
+                v->obstacles[i].col, v->obstacles[i].row,
+                NAV_OBSTACLE_SIDE_CELLS + 2.0f * NAV_CLEARANCE_CELLS) ||
+            distance(cube_col, cube_row, v->obstacles[i].col,
+                     v->obstacles[i].row) <= cube_radius +
+                NAV_OBSTACLE_SIDE_CELLS * 0.7071067812f + NAV_CLEARANCE_CELLS)) {
+            if (blocker_col && blocker_row) {
+                *blocker_col = v->obstacles[i].col;
+                *blocker_row = v->obstacles[i].row;
+            }
+            return false;
+        }
+    for (uint8_t i = 0; i < VISION_MAX_CUBES; ++i)
+        if (i != color && v->cube_valid[i] && v->cubes[i].age_ms <= FRESH_MS && (
+            !navigation_rover_clear_of_square(col, row, heading,
+                v->cubes[i].col, v->cubes[i].row,
+                v->cube_side + 2.0f * NAV_CLEARANCE_CELLS) ||
+            distance(cube_col, cube_row, v->cubes[i].col,
+                     v->cubes[i].row) <= 2.0f * cube_radius + NAV_CLEARANCE_CELLS)) {
+            if (blocker_col && blocker_row) {
+                *blocker_col = v->cubes[i].col;
+                *blocker_row = v->cubes[i].row;
+            }
+            return false;
+        }
+    if (v->peer_valid && v->peer_age_ms <= FRESH_MS &&
+        (navigation_rovers_overlap(col, row, heading,
+                                   v->peer_col, v->peer_row,
+                                   v->peer_theta_deg) ||
+         distance(cube_col, cube_row, v->peer_col, v->peer_row) <=
+             cube_radius + navigation_body_swept_radius() + NAV_CLEARANCE_CELLS)) {
+        if (blocker_col && blocker_row) {
+            *blocker_col = v->peer_col;
+            *blocker_row = v->peer_row;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool carried_segment_clear(const vision_status_t *v, uint8_t color,
+                                  float end_col, float end_row, float heading,
+                                  float *blocker_col = nullptr,
+                                  float *blocker_row = nullptr)
+{
+    const float length = distance(v->col, v->row, end_col, end_row);
+    const int steps = (int)ceilf(length / 0.5f) + 1;
+    for (int i = 0; i <= steps; ++i) {
+        const float t = (float)i / steps;
+        if (!carried_pose_clear(v, color,
+                v->col + t * (end_col - v->col),
+                v->row + t * (end_row - v->row), heading,
+                blocker_col, blocker_row)) return false;
+    }
+    return true;
+}
+
+static bool carried_turn_clear(const vision_status_t *v, uint8_t color,
+                               float target_heading)
+{
+    const float heading = current_heading(v);
+    const float error = heading_error(target_heading, heading);
+    float axle_col, axle_row;
+    navigation_axle_from_center(v->col, v->row, heading, v->cell_mm,
+                                &axle_col, &axle_row);
+    const int steps = (int)ceilf(fabsf(error) / NAV_SWEEP_SAMPLE_DEG) + 1;
+    for (int i = 0; i <= steps; ++i) {
+        const float angle = heading + error * i / steps;
+        float col, row;
+        navigation_center_from_axle(axle_col, axle_row, angle, v->cell_mm,
+                                    &col, &row);
+        if (!carried_pose_clear(v, color, col, row, angle)) return false;
+    }
+    return true;
+}
+
+static bool depot_path_clear(const vision_status_t *v, uint8_t color,
+                             float *blocker_col = nullptr,
+                             float *blocker_row = nullptr)
+{
+    const float heading = atan2f(-(v->depot_row[color] - v->row),
+                                 v->depot_col[color] - v->col) * 57.2957795f;
+    const float length = distance(v->col, v->row, v->depot_col[color],
+                                  v->depot_row[color]);
+    const float step = fmaxf(0.0f, length - COMPETITION_DEPOT_STEP_START_CELLS);
+    const float radians = heading * 0.01745329252f;
+    return carried_segment_clear(v, color,
+        v->col + step * cosf(radians), v->row - step * sinf(radians), heading,
+        blocker_col, blocker_row);
+}
+
+static void plan_depot_detour(const vision_status_t *v, uint8_t color)
+{
+    float blocker_col = NAN, blocker_row = NAN;
+    depot_path_clear(v, color, &blocker_col, &blocker_row);
+    motor_adapter_stop();
+    if (!isfinite(blocker_col) || !isfinite(blocker_row)) {
+        s_phase = EXEC_DEPOT_BLOCKED_WAIT;
+        return;
+    }
+    const float heading = competition_depot_detour_heading(
+        v->col, v->row, v->depot_col[color], v->depot_row[color],
+        blocker_col, blocker_row);
+    const float radians = heading * 0.01745329252f;
+    const float end_col = v->col + COMPETITION_DEPOT_DETOUR_CELLS * cosf(radians);
+    const float end_row = v->row - COMPETITION_DEPOT_DETOUR_CELLS * sinf(radians);
+    if (!carried_turn_clear(v, color, heading) ||
+        !carried_segment_clear(v, color, end_col, end_row, heading)) {
+        s_phase = EXEC_DEPOT_BLOCKED_WAIT;
+        return;
+    }
+    s_detour_heading = heading;
+    s_detour_col = end_col;
+    s_detour_row = end_row;
+    s_phase = EXEC_DEPOT_DETOUR_TURN;
 }
 
 static bool reposition_safe(const vision_status_t *v, uint8_t color,
@@ -683,8 +784,6 @@ static void retry_cube_capture(uint8_t color)
     s_cube_straight_active = false;
     s_cube_clearance_timestamp_ms = 0;
     s_cube_near_since_ms = 0;
-    s_capture_turn_chosen = false;
-    s_last_cube_turn_near_goal = false;
     s_stall_since_ms = 0;
     s_stall_anchor_valid = false;
     s_phase = EXEC_TO_CUBE;
@@ -787,6 +886,12 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         s_hold_ms = now_ms();
         return;
     }
+    if (s_cube_held &&
+        distance(v->col, v->row, v->cubes[color].col,
+                 v->cubes[color].row) > COMPETITION_CUBE_NEAR_CELLS + 1.5f) {
+        retry_cube_capture(color);
+        return;
+    }
     if (s_phase == EXEC_REPOSITION) {
         const uint64_t tick_ms = now_ms();
         if (s_reposition_last_drive_ms && tick_ms > s_reposition_last_drive_ms &&
@@ -838,7 +943,8 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         stop();
         s_cube_straight_active = false;
         if (now_ms() - s_hold_ms >= 1000)
-            s_phase = s_cube_staged ? EXEC_TO_CUBE : EXEC_STAGE_CUBE;
+            s_phase = s_cube_held ? EXEC_ALIGN_DEPOT :
+                s_cube_staged ? EXEC_TO_CUBE : EXEC_STAGE_CUBE;
         return;
     }
     if (s_phase == EXEC_STAGE_CUBE) {
@@ -894,8 +1000,6 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
             s_cube_straight_active = false;
             s_cube_held = true;
             s_phase = EXEC_ALIGN_DEPOT;
-            s_capture_turn_chosen = false;
-            s_last_cube_turn_near_goal = false;
             s_stall_anchor_valid = false;
             ESP_LOGI(TAG, "Cubo recogido: color=%u distancia=%.2f confirmacion=%s",
                      color, cube_distance,
@@ -962,14 +1066,18 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         return;
     }
     if (s_phase == EXEC_ALIGN_DEPOT) {
-        if (!s_capture_turn_chosen) {
-            s_capture_turn_direction = capture_turn_direction(v, color);
-            s_capture_turn_chosen = true;
+        if (!depot_path_clear(v, color)) {
+            plan_depot_detour(v, color);
+            return;
         }
         const float target = atan2f(-(v->depot_row[color] - v->row),
                                     v->depot_col[color] - v->col) * 57.2957795f;
-        if (turn_to(v, target, COMPETITION_HALF_PWM, true,
-                    s_capture_turn_direction)) {
+        if (!carried_turn_clear(v, color, target)) {
+            motor_adapter_stop();
+            s_phase = EXEC_DEPOT_BLOCKED_WAIT;
+            return;
+        }
+        if (turn_to(v, target, COMPETITION_HALF_PWM, true)) {
             s_depot_turn_frame_sequence = v->sequence;
             s_phase = EXEC_VERIFY_DEPOT_ALIGNMENT;
             s_stall_since_ms = 0;
@@ -981,6 +1089,10 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         motor_adapter_stop();
         if (!competition_vision_frame_is_new(v->sequence, s_depot_turn_frame_sequence) ||
             !cube_ready(v, color)) return;
+        if (!depot_path_clear(v, color)) {
+            plan_depot_detour(v, color);
+            return;
+        }
         const bool line_hits_cube = competition_assignment_line_hits_cube(
             v->col, v->row, v->depot_col[color], v->depot_row[color],
             v->cubes[color].col, v->cubes[color].row);
@@ -995,6 +1107,10 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
     if (s_phase == EXEC_TO_DEPOT) {
         if (delivered(v, color)) {
             complete_delivery(v, role);
+            return;
+        }
+        if (!depot_path_clear(v, color)) {
+            plan_depot_detour(v, color);
             return;
         }
         const float cube_to_depot = distance(v->cubes[color].col,
@@ -1034,9 +1150,45 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         direct_drive(v, v->depot_col[color], v->depot_row[color], 1000);
         return;
     }
+    if (s_phase == EXEC_DEPOT_DETOUR_TURN) {
+        if (!carried_turn_clear(v, color, s_detour_heading)) {
+            motor_adapter_stop();
+            s_phase = EXEC_DEPOT_BLOCKED_WAIT;
+            return;
+        }
+        if (turn_to(v, s_detour_heading, COMPETITION_HALF_PWM, true))
+            s_phase = EXEC_DEPOT_DETOUR_ADVANCE;
+        return;
+    }
+    if (s_phase == EXEC_DEPOT_DETOUR_ADVANCE) {
+        if (distance(v->col, v->row, s_detour_col, s_detour_row) <= 0.8f) {
+            motor_adapter_stop();
+            s_phase = EXEC_ALIGN_DEPOT;
+            return;
+        }
+        if (!carried_segment_clear(v, color, s_detour_col, s_detour_row,
+                                   s_detour_heading)) {
+            motor_adapter_stop();
+            s_phase = EXEC_DEPOT_BLOCKED_WAIT;
+            return;
+        }
+        if (peer_block_action(v, 0.8f, role) != PEER_BLOCK_NONE) {
+            motor_adapter_stop();
+            return;
+        }
+        direct_drive(v, s_detour_col, s_detour_row, COMPETITION_HALF_PWM);
+        return;
+    }
+    if (s_phase == EXEC_DEPOT_BLOCKED_WAIT) {
+        motor_adapter_stop();
+        if (depot_path_clear(v, color)) {
+            s_phase = EXEC_ALIGN_DEPOT;
+        } else {
+            plan_depot_detour(v, color);
+        }
+        return;
+    }
     if (s_phase == EXEC_DEPOT_WAIT_VISION) {
-        s_capture_turn_chosen = false;
-        s_last_cube_turn_near_goal = false;
         s_phase = EXEC_ALIGN_DEPOT;
         return;
     }
@@ -1127,9 +1279,6 @@ void competition_runtime_reset(void)
     s_center_reverse_last_drive_ms = 0;
     s_center_reverse_driven_ms = 0;
     s_first_delivery_retreat = false;
-    s_capture_turn_direction = 0;
-    s_capture_turn_chosen = false;
-    s_last_cube_turn_near_goal = false;
     s_cube_straight_active = false;
     s_cube_held = false;
     s_stall_since_ms = 0;

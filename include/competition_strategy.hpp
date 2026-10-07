@@ -14,6 +14,8 @@
 // rover keeps driving and can push a cube out of the play area.
 #define COMPETITION_CUBE_HELD_CELLS 4.2f
 #define COMPETITION_DETOUR_CELLS 7.0f
+#define COMPETITION_DEPOT_DETOUR_CELLS 5.0f
+#define COMPETITION_DEPOT_DETOUR_DEGREES 60.0f
 #define COMPETITION_DEPOT_APPROACH_CELLS 2.5f
 #define COMPETITION_DEPOT_STEP_START_CELLS 3.0f
 #define COMPETITION_DEPOT_STEP_CELLS 1.0f
@@ -94,6 +96,20 @@ static inline float competition_trim_from_yaw(float yaw_deg)
 static inline bool competition_depot_needs_correction(float distance_cells)
 {
     return isfinite(distance_cells) && distance_cells > COMPETITION_DEPOT_APPROACH_CELLS;
+}
+
+// The obstacle's side is measured relative to the direct bearing to the depot.
+static inline float competition_depot_detour_heading(
+    float col, float row, float depot_col, float depot_row,
+    float obstacle_col, float obstacle_row)
+{
+    const float bearing = atan2f(-(depot_row - row), depot_col - col);
+    const float dx = obstacle_col - col;
+    const float dy = obstacle_row - row;
+    const float obstacle_left = -dx * sinf(bearing) - dy * cosf(bearing);
+    return bearing * 57.2957795f +
+        (obstacle_left >= 0.0f ? -COMPETITION_DEPOT_DETOUR_DEGREES
+                               : COMPETITION_DEPOT_DETOUR_DEGREES);
 }
 
 static inline bool competition_cube_inside(float col, float row,
