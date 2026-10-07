@@ -49,6 +49,35 @@ HY-SRF05 alimentado a 5 V debe contar con adaptación de nivel si la tarjeta no 
 incorpora. GPIO34, GPIO35, GPIO36 y GPIO39 son sólo de entrada y no incluyen
 resistencias pull-up/pull-down internas.
 
+## Códigos del NeoPixel en modo competencia
+
+El NeoPixel integrado de GPIO2 muestra el resultado de la entrada a competencia.
+Al cambiar de modo, el firmware detiene los motores y comienza la verificación;
+durante ese proceso el LED permanece apagado. Los destellos rojos codifican el
+primer paso de verificación que falló:
+
+| Código | Destellos rojos | Significado |
+|---:|---|---|
+| 1 | 1 | No se obtuvo conexión Wi-Fi con dirección IPv4 dentro del tiempo de espera. |
+| 2 | 2 | No hay configuración del servidor de visión guardada en NVS. |
+| 3 | 3 | No se pudo verificar el enlace de comunicación ESP-NOW con el otro rover. |
+| 4 | 4 | La identidad propia o la del compañero no es válida, no se recibió o coincide con la propia. |
+| 5 | 5 | No se pudo leer la MAC propia, falta configurar la MAC del compañero o ambas MAC son iguales. |
+| 6 | 6 | Falló el preflight de sensores, IMU, motores o sensores infrarrojos. |
+
+Cada destello dura aproximadamente 200 ms y los destellos se separan por
+200 ms. Después de la secuencia hay una pausa de 1 s y el código se repite.
+Por ejemplo, cuatro destellos rojos seguidos de la pausa indican el código 4.
+El código 6 agrupa errores del preflight: tiempo de espera de sensores,
+respuesta inválida, movimiento/lectura de IMU inválidos o falta de eventos
+infrarrojos.
+
+Cuando las verificaciones terminan correctamente, el color fijo identifica al
+rover: amarillo para rover 10, magenta para rover 11 y rojo si la identidad no
+es reconocida. Si el rumbo todavía no quedó calibrado, ese color parpadea a
+1 Hz. El indicador no señala las fases de navegación ni la entrega de cubos.
+En modo de prueba, en cambio, el LED azul pulsa.
+
 ## Módulos
 
 | Módulo | API pública | Responsabilidad |
