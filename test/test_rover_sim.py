@@ -232,12 +232,12 @@ def test_gui_displays_cube_staging_phase(tmp_path,host_exe,monkeypatch):
             w.sim.step()
         assert w.sim.status[1]['phase'] == 12
         w.refresh()
-        assert 'Preparar captura' in w.status_label.text()
+        assert 'Aproximación directa al cubo' in w.status_label.text()
         for _ in range(420):
             w.sim.step()
-        assert w.sim.status[0]['phase'] == 13
+        assert w.sim.status[0]['phase'] == 12
         w.refresh()
-        assert 'Recolocar para reintento' in w.status_label.text()
+        assert 'Aproximación directa al cubo' in w.status_label.text()
         while w.sim.status[1]['phase'] != 14 and w.sim.step_id < 1500:
             w.sim.step()
         assert w.sim.status[1]['phase'] == 14
@@ -272,7 +272,7 @@ def test_repeated_camera_capture_brakes_before_cube(tmp_path,host_exe):
     stage_exit = None
     previous = 0
     try:
-        for _ in range(500):
+        for _ in range(650):
             snapshot = sim.step()
             phase = sim.status[1]['phase']
             if previous == 12 and phase == 1:
@@ -286,28 +286,29 @@ def test_repeated_camera_capture_brakes_before_cube(tmp_path,host_exe):
                 (tmp_path/'approach/trace.ndjson').read_text().splitlines()]
     timestamps = [frame['ts_ms'] for frame in captures if frame is not None]
     assert any(a == b for a,b in zip(timestamps,timestamps[1:]))
-    # The rover stopped before either its arms or body could push the cube.
-    assert math.dist(stage_exit['rovers'][1][:2],stage_exit['cubes'][2][:2]) >= 175
+    # Brake at the cube's contact envelope before the final capture approach.
+    assert 80 <= math.dist(stage_exit['rovers'][1][:2],stage_exit['cubes'][2][:2]) <= 110
     assert stage_exit['cubes'][2][:2] == [500,550]
 
 
-def test_cube_displacement_repositions_backward_for_1300_ms(tmp_path,host_exe):
-    sim = Simulation(scenario(),tmp_path/'backward',host_exe)
+def test_direct_cube_approach_points_and_drives_straight(tmp_path,host_exe):
+    sim = Simulation(scenario(),tmp_path/'direct',host_exe)
     try:
-        for _ in range(870):
+        for _ in range(600):
             sim.step()
     finally:
         sim.close()
     records = [json.loads(line) for line in
-               (tmp_path/'backward/trace.ndjson').read_text().splitlines()]
-    start = next(i for i,row in enumerate(records)
-                 if row['outputs'][0]['phase'] == 13)
-    end = next(i for i in range(start+1,len(records))
-               if records[i]['outputs'][0]['phase'] != 13)
-    commands = [(row['outputs'][0]['left'],row['outputs'][0]['right'])
-                for row in records[start:end] if row['outputs'][0]['left']]
-    assert commands == [(-700,-700)] * 130
-    assert records[end]['outputs'][0]['phase'] == 12
+               (tmp_path/'direct/trace.ndjson').read_text().splitlines()]
+    forward = [row for row in records if row['outputs'][1]['phase'] == 12
+               and row['outputs'][1]['left'] > 0 and row['outputs'][1]['right'] > 0]
+    assert forward
+    assert all(row['outputs'][1]['left'] == row['outputs'][1]['right'] for row in forward)
+    first = forward[0]['world']
+    rover = first['rovers'][1]
+    cube = first['cubes'][2]
+    bearing = math.degrees(math.atan2(rover[1]-cube[1],cube[0]-rover[0]))
+    assert abs((bearing-rover[2]+180)%360-180) <= 8
 
 
 def test_cube_displacement_uses_forward_when_reverse_exits_field(tmp_path,host_exe):

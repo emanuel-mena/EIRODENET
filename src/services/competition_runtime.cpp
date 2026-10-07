@@ -102,6 +102,10 @@ static bool s_first_delivery_retreat;
 static bool s_last_cube_mission;
 static int8_t s_last_cube_turn_direction;
 static bool s_last_cube_turn_near_goal;
+static bool s_cube_straight_active;
+static float s_cube_straight_start_col;
+static float s_cube_straight_start_row;
+static float s_cube_straight_heading;
 
 static uint64_t now_ms(void) { return (uint64_t)(esp_timer_get_time() / 1000); }
 static float distance(float ax, float ay, float bx, float by)
@@ -469,35 +473,29 @@ static void direct_drive(const vision_status_t *v, float target_col, float targe
     motor_adapter_set((int16_t)left, (int16_t)right);
 }
 
-static bool cube_approach_target(const vision_status_t *v, uint8_t color,
-                                 float *target_col, float *target_row)
+static void drive_straight_to_cube(const vision_status_t *v, uint8_t color, int pwm)
 {
-    if (!v || color >= VISION_MAX_CUBES || !target_col || !target_row) return false;
     const float dx = v->cubes[color].col - v->col;
     const float dy = v->cubes[color].row - v->row;
-    const float length = hypotf(dx, dy);
-    if (!isfinite(length) || length <= 0.001f) return false;
-    *target_col = v->cubes[color].col -
-                  COMPETITION_CUBE_APPROACH_OFFSET_CELLS * dx / length;
-    *target_row = v->cubes[color].row -
-                  COMPETITION_CUBE_APPROACH_OFFSET_CELLS * dy / length;
-    return navigation_segment_inside_mm(v->col, v->row, *target_col, *target_row,
-                                        current_heading(v), v->grid_cols, v->grid_rows,
-                                        v->cell_mm);
-}
-
-static bool cube_stage_target(const vision_status_t *v, uint8_t color,
-                              float *target_col, float *target_row)
-{
-    const float dx = v->depot_col[color] - v->cubes[color].col;
-    const float dy = v->depot_row[color] - v->cubes[color].row;
-    const float length = hypotf(dx, dy);
-    if (!isfinite(length) || length < 0.001f) return false;
-    *target_col = v->cubes[color].col - 9.0f * dx / length;
-    *target_row = v->cubes[color].row - 9.0f * dy / length;
-    return navigation_pose_inside_mm(*target_col, *target_row,
-                                     current_heading(v), v->grid_cols,
-                                     v->grid_rows, v->cell_mm);
+    const float bearing = atan2f(-dy, dx) * 57.2957795f;
+    if (s_cube_straight_active) {
+        const float travelled = distance(v->col, v->row,
+                                         s_cube_straight_start_col, s_cube_straight_start_row);
+        if (travelled >= 3.0f ||
+            fabsf(heading_error(s_cube_straight_heading, current_heading(v))) > 8.0f ||
+            fabsf(heading_error(bearing, current_heading(v))) > 12.0f) {
+            motor_adapter_stop();
+            s_cube_straight_active = false;
+            return;
+        }
+        motor_adapter_set(pwm, pwm);
+        return;
+    }
+    if (!turn_to(v, bearing, pwm)) return;
+    s_cube_straight_heading = bearing;
+    s_cube_straight_start_col = v->col;
+    s_cube_straight_start_row = v->row;
+    s_cube_straight_active = true;
 }
 
 static bool cube_push_is_safe(const vision_status_t *v, uint8_t color)
@@ -561,6 +559,7 @@ static void begin_reposition(const vision_status_t *v, uint8_t color)
     s_cube_anchor_frame_ms = v->frame_timestamp_ms;
     s_cube_anchor_valid = true;
     s_cube_staged = false;
+    s_cube_straight_active = false;
     s_have_detour_target = false;
     stop();
     if (s_reposition_direction) {
@@ -743,6 +742,7 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
     const uint8_t color = s_local.color;
     if (!cube_ready(v, color)) {
         stop();
+        s_cube_straight_active = false;
         s_phase = EXEC_HOLD;
         s_hold_ms = now_ms();
         return;
@@ -796,41 +796,32 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
     }
     if (s_phase == EXEC_HOLD) {
         stop();
+        s_cube_straight_active = false;
         if (now_ms() - s_hold_ms >= 1000)
             s_phase = s_cube_staged ? EXEC_TO_CUBE : EXEC_STAGE_CUBE;
         return;
     }
     if (s_phase == EXEC_STAGE_CUBE) {
-        float stage_col, stage_row;
-        if (!cube_stage_target(v, color, &stage_col, &stage_row)) {
-            if (s_last_cube_mission) {
-                stop();
-                s_cube_staged = true;
-                s_phase = EXEC_TO_CUBE;
-            } else {
-                stop();
-                s_phase = EXEC_HOLD;
-                s_hold_ms = now_ms();
-            }
-            return;
-        }
         navigation_status_t navigation = {};
         navigation_service_get_status(&navigation);
         const float speed = navigation.pose_valid
             ? fabsf(navigation.linear_speed_cells_s) : 9.0f;
-        const float remaining = distance(v->col, v->row, stage_col, stage_row);
-        if (remaining <= fmaxf(1.2f, competition_stopping_distance(speed) + 0.7f)) {
+        const float remaining = distance(v->col, v->row,
+                                         v->cubes[color].col, v->cubes[color].row);
+        if (remaining <= fmaxf(4.7f, competition_stopping_distance(speed) + 0.7f)) {
             stop();
+            s_cube_straight_active = false;
             s_cube_staged = true;
             s_phase = EXEC_TO_CUBE;
             return;
         }
         if (peer_block_action(v, 1.5f, role) != PEER_BLOCK_NONE) {
             stop();
+            s_cube_straight_active = false;
             return;
         }
-        direct_drive(v, stage_col, stage_row,
-                     remaining < 7.0f ? COMPETITION_HALF_PWM : COMPETITION_FULL_PWM);
+        drive_straight_to_cube(v, color,
+                               remaining < 7.0f ? COMPETITION_HALF_PWM : COMPETITION_FULL_PWM);
         return;
     }
     if (s_phase == EXEC_TO_CUBE) {
@@ -860,6 +851,7 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
                                       sensors.ultrasonic_valid,
                                       sensors.ultrasonic_error == ESP_ERR_TIMEOUT) && cube_ahead) {
             motor_adapter_stop();
+            s_cube_straight_active = false;
             s_phase = EXEC_ALIGN_DEPOT;
             s_last_cube_turn_direction = s_last_cube_mission
                 ? turn_away_from_nearest_cube(v, color) : 0;
@@ -876,6 +868,7 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         if (cube_distance <= COMPETITION_CUBE_NEAR_CELLS &&
             !cube_push_is_safe(v, color)) {
             motor_adapter_stop();
+            s_cube_straight_active = false;
             s_hold_ms = now_ms();
             s_phase = EXEC_HOLD;
             ESP_LOGW(TAG, "Aproximacion cancelada: empujaria el cubo fuera del tablero");
@@ -888,6 +881,7 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         const peer_block_action_t peer_action = peer_block_action(v, 0.8f, role);
         if (peer_action == PEER_BLOCK_STOP) {
             stop();
+            s_cube_straight_active = false;
             return;
         }
         if (peer_action == PEER_BLOCK_REVERSE) {
@@ -896,15 +890,7 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         }
         const int pwm = cube_distance <= COMPETITION_CUBE_NEAR_CELLS
             ? COMPETITION_HALF_PWM : COMPETITION_FULL_PWM;
-        float approach_col = v->cubes[color].col;
-        float approach_row = v->cubes[color].row;
-        if (!cube_approach_target(v, color, &approach_col, &approach_row)) {
-            motor_adapter_stop();
-            s_hold_ms = now_ms();
-            s_phase = EXEC_HOLD;
-            return;
-        }
-        direct_drive(v, approach_col, approach_row, pwm);
+        drive_straight_to_cube(v, color, pwm);
         return;
     }
     if (s_phase == EXEC_DETOUR_TURN) {
@@ -1090,6 +1076,7 @@ void competition_runtime_reset(void)
     s_last_cube_mission = false;
     s_last_cube_turn_direction = 0;
     s_last_cube_turn_near_goal = false;
+    s_cube_straight_active = false;
     s_stall_since_ms = 0;
     s_stall_anchor_valid = false;
     s_hold_ms = 0;
