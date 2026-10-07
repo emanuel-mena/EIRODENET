@@ -260,7 +260,7 @@ puede agregar `--synthetic`; `--no-start` exige que el servidor ya esté activo.
 El firmware siempre inicia en modo prueba. Sólo una pulsación local de BOOT cambia a
 competencia; una orden ESP-NOW remota nunca puede activar ese cambio. Cada transición
 detiene los motores. Antes de declarar READY, el rover ejecuta un preflight no
-bloqueante: avanza a PWM 1000 durante un segundo, integra la deriva de yaw, calcula
+bloqueante: avanza a PWM 1000 durante 0,4 segundos, integra la deriva de yaw, calcula
 trim diferencial manteniendo un motor en 1000, vuelve al origen por tiempo, repite el
 avance con trim, valida cambios de patrón IR estables durante dos lecturas, compara
 la velocidad IR con la IMU y vuelve al origen. Un fallo de IMU, IR o deriva bloquea
@@ -276,14 +276,18 @@ primer rover que confirma una entrega publica un evento ESP-NOW con
 identificador, color y tiempo; el comandante arbitra por tiempo y luego por ID y
 reasigna el cubo restante. Las notificaciones se repiten de forma idempotente.
 
-La navegación de competencia es directa: gira con la IMU al objetivo y avanza a la
-mayor velocidad. Un obstáculo ultrasónico a 3 cm o menos sólo desvía si el cubo está
-a más de 5 celdas: gira 60 grados a la derecha, avanza 7 celdas y recalcula el
-rumbo. Para el acople, el rover se detiene después de cada nueva pose de visión,
+La navegación de competencia gira con la IMU hacia el cubo y avanza a PWM 1000
+si está a más de 6 celdas. Si en esa zona el ultrasónico detecta algo a 6 cm o
+menos, gira 60 grados a la derecha, avanza 7 celdas y recalcula el rumbo. A 6
+celdas o menos se acerca a PWM 700. Confirma la recogida si la distancia entre
+centros es menor que 3,5 celdas en visión, o si el ultrasónico da timeout en la
+zona próxima después de una lectura previa de al menos 7 cm. El
+primer giro hacia el acopio usa impulsos de PWM 700 con la mitad del tiempo activo.
+Para el acople, el rover se detiene después de cada nueva pose de visión,
 recalcula el rumbo al centro del acopio y vuelve a avanzar mientras está a más de
 2.5 celdas. A 2.5 celdas o menos empuja hacia el centro con la consigna mínima móvil
 de 700/1000 PWM hasta que el contrato v3 confirme `cube.in_depot`. Ante un
-acopio confirmado, ambos motores retroceden durante 700 ms antes de que el rover
+acopio confirmado, ambos motores retroceden durante un segundo antes de que el rover
 quede disponible o active su siguiente objetivo. Ante un solapamiento previsto entre
 rovers, el comandante se detiene y el soldado conserva su movimiento durante un
 segundo; si el solapamiento persiste, el soldado retrocede con consigna 700 hasta

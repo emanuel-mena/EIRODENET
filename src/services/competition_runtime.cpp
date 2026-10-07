@@ -20,8 +20,6 @@
 #include "vision_service.hpp"
 
 #define FRESH_MS 750U
-#define CUBE_APPROACH_CELLS 8.3f
-#define CUBE_DETOUR_LIMIT_CELLS COMPETITION_DETOUR_MIN_DISTANCE_CELLS
 #define STALL_DISTANCE_CELLS 1.0f
 #define STALL_TIME_MS 3000U
 #define STALL_PAUSE_MS 5000U
@@ -74,6 +72,8 @@ static bool s_stall_anchor_valid;
 static uint64_t s_hold_ms;
 static uint64_t s_peer_block_since_ms;
 static uint32_t s_depot_frame_sequence;
+static uint64_t s_cube_clearance_timestamp_ms;
+static uint64_t s_cube_near_since_ms;
 static uint64_t s_reverse_started_ms;
 static uint8_t s_pending_reserve_color = UINT8_MAX;
 static uint64_t s_commander_delay_started_ms;
@@ -186,6 +186,8 @@ static void begin_local_mission(const peer_mission_t *mission)
     s_stall_since_ms = 0;
     s_have_detour_target = false;
     s_depot_frame_sequence = 0;
+    s_cube_clearance_timestamp_ms = 0;
+    s_cube_near_since_ms = 0;
     s_commander_delay_started_ms = 0;
 }
 
@@ -294,20 +296,28 @@ static void send_remote(void)
     }
 }
 
-static bool turn_to(const vision_status_t *v, float target, int max_pwm)
+static bool turn_to(const vision_status_t *v, float target, int max_pwm,
+                    bool half_speed = false)
 {
     rover_imu_state_t imu = {};
     rover_service_get_imu(&imu);
     const float error = heading_error(target, current_heading(v));
     bool settled = false;
+    const uint32_t tick = (uint32_t)(now_ms() / 10U);
     const int pwm = motion_turn_pwm(error,
                                     imu.valid ? imu.sample.gyro_dps[2] : 0.0f,
-                                    (uint32_t)(now_ms() / 10U), &settled);
+                                    tick, &settled);
     if (settled) {
         motor_adapter_stop();
         return true;
     }
     if (pwm == 0) {
+        motor_adapter_stop();
+        return false;
+    }
+    if (half_speed && tick % 16U >= 8U) {
+        // The motor driver raises nonzero commands below 700 to 700. Pulse at
+        // 700 to halve the average turn drive without using an ineffective PWM.
         motor_adapter_stop();
         return false;
     }
@@ -327,7 +337,7 @@ static void direct_drive(const vision_status_t *v, float target_col, float targe
     const float desired = atan2f(-(target_row - v->row), target_col - v->col) * 57.2957795f;
     const float error = heading_error(desired, current_heading(v));
     if (fabsf(error) > 28.0f) {
-        turn_to(v, desired, 1000);
+        turn_to(v, desired, base_pwm);
         return;
     }
     const float trim = -competition.motor_trim_pwm;
@@ -350,12 +360,12 @@ static void direct_drive(const vision_status_t *v, float target_col, float targe
     motor_adapter_set((int16_t)left, (int16_t)right);
 }
 
-static bool obstacle_requires_detour(const vision_status_t *v, uint8_t color,
+static bool obstacle_requires_detour(float cube_distance,
                                      const rover_sensor_state_t *sensors)
 {
-    return sensors->ultrasonic_valid && sensors->distance_mm <= COMPETITION_OBSTACLE_MM &&
-           distance(v->col, v->row, v->cubes[color].col, v->cubes[color].row) >
-               CUBE_DETOUR_LIMIT_CELLS;
+    return cube_distance > COMPETITION_CUBE_NEAR_CELLS &&
+           sensors->ultrasonic_valid &&
+           sensors->distance_mm <= COMPETITION_CUBE_DETECT_MM;
 }
 
 static void start_detour(const vision_status_t *v)
@@ -477,7 +487,35 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
     if (s_phase == EXEC_TO_CUBE) {
         rover_sensor_state_t sensors = {};
         rover_service_get_sensors(&sensors);
-        if (obstacle_requires_detour(v, color, &sensors)) {
+        const float cube_distance = distance(v->col, v->row,
+                                             v->cubes[color].col, v->cubes[color].row);
+        const bool ultrasound_fresh = sensors.timestamp_ms != 0 &&
+            now_ms() >= sensors.timestamp_ms &&
+            now_ms() - sensors.timestamp_ms <= 500U;
+        if (ultrasound_fresh && sensors.ultrasonic_valid &&
+            sensors.distance_mm >= COMPETITION_CUBE_CLEARANCE_MM)
+            s_cube_clearance_timestamp_ms = sensors.timestamp_ms;
+        if (cube_distance <= COMPETITION_CUBE_NEAR_CELLS) {
+            if (s_cube_near_since_ms == 0) s_cube_near_since_ms = now_ms();
+        } else {
+            s_cube_near_since_ms = 0;
+        }
+        if (competition_cube_acquired(cube_distance,
+                                      s_cube_clearance_timestamp_ms,
+                                      s_cube_near_since_ms,
+                                      sensors.timestamp_ms,
+                                      ultrasound_fresh,
+                                      sensors.ultrasonic_valid,
+                                      sensors.ultrasonic_error == ESP_ERR_TIMEOUT)) {
+            motor_adapter_stop();
+            s_phase = EXEC_ALIGN_DEPOT;
+            s_stall_anchor_valid = false;
+            ESP_LOGI(TAG, "Cubo recogido: color=%u distancia=%.2f confirmacion=%s",
+                     color, cube_distance,
+                     cube_distance < COMPETITION_CUBE_HELD_CELLS ? "vision" : "timeout");
+            return;
+        }
+        if (ultrasound_fresh && obstacle_requires_detour(cube_distance, &sensors)) {
             start_detour(v);
             return;
         }
@@ -490,14 +528,9 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
             motor_adapter_set(-COMPETITION_HALF_PWM, -COMPETITION_HALF_PWM);
             return;
         }
-        if (distance(v->col, v->row, v->cubes[color].col, v->cubes[color].row) <=
-            CUBE_APPROACH_CELLS) {
-            motor_adapter_stop();
-            s_phase = EXEC_ALIGN_DEPOT;
-            s_stall_anchor_valid = false;
-            return;
-        }
-        direct_drive(v, v->cubes[color].col, v->cubes[color].row, 1000);
+        const int pwm = cube_distance <= COMPETITION_CUBE_NEAR_CELLS
+            ? COMPETITION_HALF_PWM : COMPETITION_FULL_PWM;
+        direct_drive(v, v->cubes[color].col, v->cubes[color].row, pwm);
         return;
     }
     if (s_phase == EXEC_DETOUR_TURN) {
@@ -531,7 +564,7 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
     if (s_phase == EXEC_ALIGN_DEPOT) {
         const float target = atan2f(-(v->depot_row[color] - v->row),
                                     v->depot_col[color] - v->col) * 57.2957795f;
-        if (turn_to(v, target, 700)) {
+        if (turn_to(v, target, COMPETITION_HALF_PWM, true)) {
             s_depot_frame_sequence = v->sequence;
             s_phase = EXEC_TO_DEPOT;
             s_stall_since_ms = 0;
@@ -547,7 +580,7 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
             s_phase = EXEC_PUSH;
             return;
         }
-        if (competition_depot_frame_is_new(v->sequence, s_depot_frame_sequence)) {
+        if (competition_vision_frame_is_new(v->sequence, s_depot_frame_sequence)) {
             motor_adapter_stop();
             s_phase = EXEC_DEPOT_WAIT_VISION;
             return;
@@ -612,6 +645,8 @@ void competition_runtime_reset(void)
     s_hold_ms = 0;
     s_peer_block_since_ms = 0;
     s_depot_frame_sequence = 0;
+    s_cube_clearance_timestamp_ms = 0;
+    s_cube_near_since_ms = 0;
     s_reverse_started_ms = 0;
     s_pending_reserve_color = UINT8_MAX;
     s_commander_delay_started_ms = 0;

@@ -6,15 +6,33 @@
 
 #define COMPETITION_FULL_PWM 1000
 #define COMPETITION_HALF_PWM 700
-#define COMPETITION_OBSTACLE_MM 30U
+#define COMPETITION_CUBE_DETECT_MM 60U
+#define COMPETITION_CUBE_CLEARANCE_MM 70U
+#define COMPETITION_CUBE_NEAR_CELLS 6.0f
+#define COMPETITION_CUBE_HELD_CELLS 3.5f
 #define COMPETITION_DETOUR_CELLS 7.0f
-#define COMPETITION_DETOUR_MIN_DISTANCE_CELLS 5.0f
 #define COMPETITION_DEPOT_APPROACH_CELLS 2.5f
 #define COMPETITION_DEPOT_SLOW_PWM COMPETITION_HALF_PWM
-#define COMPETITION_DELIVERY_REVERSE_MS 700U
+#define COMPETITION_DELIVERY_REVERSE_MS 1000U
 #define COMPETITION_ASSIGNMENT_PATH_WIDTH_CELLS 5.0f
 #define COMPETITION_ASSIGNMENT_CUBE_DIAMETER_CELLS 3.0f
 #define COMPETITION_COMMANDER_START_DELAY_MS 3000U
+
+static inline bool competition_cube_acquired(float distance_cells,
+                                              uint64_t clearance_ms,
+                                              uint64_t near_since_ms,
+                                              uint64_t ultrasonic_ms,
+                                              bool ultrasonic_fresh,
+                                              bool ultrasonic_valid,
+                                              bool ultrasonic_timeout)
+{
+    if (!isfinite(distance_cells)) return false;
+    if (distance_cells < COMPETITION_CUBE_HELD_CELLS) return true;
+    if (distance_cells > COMPETITION_CUBE_NEAR_CELLS ||
+        clearance_ms == 0 || near_since_ms == 0) return false;
+    return ultrasonic_fresh && !ultrasonic_valid && ultrasonic_timeout &&
+           ultrasonic_ms > clearance_ms && ultrasonic_ms >= near_since_ms;
+}
 
 static inline float competition_trim_from_yaw(float yaw_deg)
 {
@@ -27,7 +45,7 @@ static inline bool competition_depot_needs_correction(float distance_cells)
     return isfinite(distance_cells) && distance_cells > COMPETITION_DEPOT_APPROACH_CELLS;
 }
 
-static inline bool competition_depot_frame_is_new(uint32_t sequence, uint32_t last_sequence)
+static inline bool competition_vision_frame_is_new(uint32_t sequence, uint32_t last_sequence)
 {
     return sequence != last_sequence;
 }

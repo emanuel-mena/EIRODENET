@@ -21,7 +21,7 @@
 #define PEER_WAIT_MS 5000
 #define PEER_RETRY_MS 200
 #define PREFLIGHT_SETTLE_MS 300
-#define PREFLIGHT_FORWARD_MS 1000
+#define PREFLIGHT_FORWARD_MS 400
 #define PREFLIGHT_MAX_YAW_DEG 180.0f
 
 static const char *TAG = "competition";
