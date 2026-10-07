@@ -7,8 +7,12 @@ from .layout import apply_layout
 from .runner import Simulation
 from .world import MARKERS
 
-PHASES = ('Espera', 'Hacia cubo', 'Giro desvío', 'Avance desvío', 'Alinear depósito', 'Hacia depósito', 'Empuje', 'Terminado', 'Espera segura', 'Pausa por atasco', 'Espera visión', 'Retirada', 'Aproximación directa al cubo', 'Recolocar para reintento', 'Orientar parte trasera al centro', 'Retroceder hacia el centro', 'Esperar respuesta del depósito')
+PHASES = ('Espera', 'Hacia cubo', 'Giro desvío', 'Avance desvío', 'Alinear depósito', 'Hacia depósito', 'Empuje', 'Terminado', 'Espera segura', 'Pausa por atasco', 'Espera visión', 'Retirada', 'Aproximación directa al cubo', 'Recolocar para reintento', 'Orientar parte trasera al centro', 'Retroceder hacia el centro', 'Esperar respuesta del depósito', 'Verificar agarre antes del depósito')
 PALETTE = {'green':'#19845b','blue':'#2478d4','red':'#d75151','obstacle':'#e1b832'}
+
+
+def phase_name(phase):
+    return PHASES[phase] if 0 <= phase < len(PHASES) else f'Fase desconocida ({phase})'
 
 
 class Arena(QWidget):
@@ -110,7 +114,7 @@ class Window(QMainWindow):
         self.refresh()
 
     def refresh(self):
-        texts = [f'Rover {i+10}: {PHASES[s["phase"]]} · PWM {s["left"]}/{s["right"]}' for i,s in enumerate(self.sim.status)]
+        texts = [f'Rover {i+10}: {phase_name(s["phase"])} · PWM {s["left"]}/{s["right"]}' for i,s in enumerate(self.sim.status)]
         self.status_label.setText(f'{self.sim.world.time_ms/1000:.2f} s  |  Entregas físicas: {sum(self.sim.world.delivered())}/3\n'+'   |   '.join(texts))
         self.arena.update()
 

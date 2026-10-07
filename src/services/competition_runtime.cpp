@@ -43,6 +43,7 @@ typedef enum {
     EXEC_ALIGN_REAR_TO_CENTER = 14,
     EXEC_REVERSE_TO_CENTER = 15,
     EXEC_PUSH_WAIT_VISION = 16,
+    EXEC_VERIFY_DEPOT_ALIGNMENT = 17,
 } exec_phase_t;
 
 static const char *TAG = "competition_run";
@@ -78,6 +79,7 @@ static bool s_stall_anchor_valid;
 static uint64_t s_hold_ms;
 static uint64_t s_peer_block_since_ms;
 static uint32_t s_depot_frame_sequence;
+static uint32_t s_depot_turn_frame_sequence;
 static uint32_t s_push_step_frame_sequence;
 static float s_push_step_anchor_col;
 static float s_push_step_anchor_row;
@@ -251,6 +253,7 @@ static void begin_local_mission(const peer_mission_t *mission)
     s_center_reverse_last_drive_ms = 0;
     s_center_reverse_driven_ms = 0;
     s_depot_frame_sequence = 0;
+    s_depot_turn_frame_sequence = 0;
     s_push_step_frame_sequence = 0;
     s_push_step_anchor_col = 0.0f;
     s_push_step_anchor_row = 0.0f;
@@ -396,10 +399,12 @@ static bool turn_to(const vision_status_t *v, float target, int max_pwm,
         motor_adapter_stop();
         return false;
     }
-    if ((s_cube_held && tick % 32U >= 8U) ||
+    if ((s_cube_held && tick % COMPETITION_CUBE_TURN_PERIOD_TICKS >=
+                           COMPETITION_CUBE_TURN_PERIOD_TICKS *
+                               COMPETITION_CUBE_TURN_DUTY_PERCENT / 100U) ||
         (!s_cube_held && half_speed && tick % 16U >= 8U)) {
-        // The driver raises commands below 700 to 700. After capture, limit
-        // turns to 80 ms on and 240 ms off instead of requesting unusable PWM.
+        // The driver raises commands below 700 to 700. Pulse captured turns
+        // at the configured duty cycle instead of requesting unusable lower PWM.
         motor_adapter_stop();
         return false;
     }
@@ -668,6 +673,23 @@ static void complete_delivery(const vision_status_t *v, competition_role_t role)
             s_pending_reserve_color = s_reserved_color;
         }
     }
+}
+
+static void retry_cube_capture(uint8_t color)
+{
+    motor_adapter_stop();
+    s_cube_held = false;
+    s_cube_staged = true;
+    s_cube_straight_active = false;
+    s_cube_clearance_timestamp_ms = 0;
+    s_cube_near_since_ms = 0;
+    s_capture_turn_chosen = false;
+    s_last_cube_turn_near_goal = false;
+    s_stall_since_ms = 0;
+    s_stall_anchor_valid = false;
+    s_phase = EXEC_TO_CUBE;
+    ESP_LOGW(TAG, "Verificacion de agarre previa al deposito fallo; reintentando cubo=%u",
+             color);
 }
 
 static void activate_pending_reserve(const vision_status_t *v, competition_role_t role)
@@ -948,11 +970,26 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
                                     v->depot_col[color] - v->col) * 57.2957795f;
         if (turn_to(v, target, COMPETITION_HALF_PWM, true,
                     s_capture_turn_direction)) {
-            s_depot_frame_sequence = v->sequence;
-            s_phase = EXEC_TO_DEPOT;
+            s_depot_turn_frame_sequence = v->sequence;
+            s_phase = EXEC_VERIFY_DEPOT_ALIGNMENT;
             s_stall_since_ms = 0;
             s_stall_anchor_valid = false;
         }
+        return;
+    }
+    if (s_phase == EXEC_VERIFY_DEPOT_ALIGNMENT) {
+        motor_adapter_stop();
+        if (!competition_vision_frame_is_new(v->sequence, s_depot_turn_frame_sequence) ||
+            !cube_ready(v, color)) return;
+        const bool line_hits_cube = competition_assignment_line_hits_cube(
+            v->col, v->row, v->depot_col[color], v->depot_row[color],
+            v->cubes[color].col, v->cubes[color].row);
+        if (!line_hits_cube) {
+            retry_cube_capture(color);
+            return;
+        }
+        s_depot_frame_sequence = v->sequence;
+        s_phase = EXEC_TO_DEPOT;
         return;
     }
     if (s_phase == EXEC_TO_DEPOT) {
@@ -1100,6 +1137,7 @@ void competition_runtime_reset(void)
     s_hold_ms = 0;
     s_peer_block_since_ms = 0;
     s_depot_frame_sequence = 0;
+    s_depot_turn_frame_sequence = 0;
     s_push_step_frame_sequence = 0;
     s_push_step_anchor_col = 0.0f;
     s_push_step_anchor_row = 0.0f;
@@ -1124,7 +1162,7 @@ bool competition_runtime_moving(void)
     return s_phase == EXEC_STAGE_CUBE || s_phase == EXEC_TO_CUBE ||
            s_phase == EXEC_REPOSITION || s_phase == EXEC_DETOUR_TURN ||
            s_phase == EXEC_DETOUR_ADVANCE || s_phase == EXEC_ALIGN_DEPOT ||
-           s_phase == EXEC_TO_DEPOT || s_phase == EXEC_PUSH ||
+           s_phase == EXEC_VERIFY_DEPOT_ALIGNMENT || s_phase == EXEC_TO_DEPOT || s_phase == EXEC_PUSH ||
            s_phase == EXEC_REVERSE_AFTER_DELIVERY ||
            s_phase == EXEC_ALIGN_REAR_TO_CENTER || s_phase == EXEC_REVERSE_TO_CENTER;
 }

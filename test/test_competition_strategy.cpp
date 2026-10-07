@@ -37,6 +37,7 @@ int main(void)
     assert(competition_vision_frame_is_new(12U, 11U));
     assert(!competition_vision_frame_is_new(12U, 12U));
     assert(COMPETITION_HALF_PWM == 700);
+    assert(COMPETITION_CUBE_TURN_DUTY_PERCENT == 30U);
     assert(COMPETITION_DEPOT_SLOW_PWM == 700);
     assert(COMPETITION_DELIVERY_REVERSE_MS == 1000U);
     assert(COMPETITION_ASSIGNMENT_PATH_WIDTH_CELLS == 5.0f);
