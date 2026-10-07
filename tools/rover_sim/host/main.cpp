@@ -9,6 +9,8 @@
 #include "competition_runtime.hpp"
 #include "competition_service.hpp"
 #include "motor_adapter.hpp"
+#include "motion_control.hpp"
+#include "navigation_geometry.hpp"
 #include "navigation_service.hpp"
 #include "peer_comms_service.hpp"
 #include "rover_service.hpp"
@@ -26,6 +28,9 @@ static peer_delivery_event_t delivery;
 static bool have_mission;
 static cJSON *outbox;
 static int left_motor, right_motor;
+static float nav_col, nav_row, nav_heading, nav_speed;
+static uint64_t nav_last_ms, nav_frame_ms;
+static bool nav_initialized;
 
 static cJSON *get(const cJSON *j, const char *k) { return cJSON_GetObjectItemCaseSensitive(j,k); }
 static double num(const cJSON *j,const char *k,double d=0) { auto x=get(j,k); return cJSON_IsNumber(x)?x->valuedouble:d; }
@@ -53,7 +58,12 @@ void peer_comms_service_get_status(peer_comms_status_t *s) { *s=peer; }
 bool peer_comms_service_get_mission(peer_mission_t *s) { if(!have_mission)return false;*s=incoming;return true; }
 bool peer_comms_service_get_delivery_event(peer_delivery_event_t *s) { *s=delivery;return delivery.valid; }
 void competition_service_get_status(competition_status_t *s) { *s={};s->ready=true;s->motor_trim_pwm=0; }
-void navigation_service_get_status(navigation_status_t *s) { *s={};s->pose_valid=vision.pose_valid;s->theta_deg=vision.theta_deg; }
+void navigation_service_get_status(navigation_status_t *s) {
+    *s={};
+    s->pose_valid=nav_initialized;
+    s->pose_col=nav_col;s->pose_row=nav_row;s->theta_deg=nav_heading;
+    s->linear_speed_cells_s=nav_speed;s->uncertainty_cells=0.3f;
+}
 esp_err_t navigation_service_cancel(navigation_cancel_reason_t) { return ESP_OK; }
 esp_err_t motor_adapter_set(int16_t l,int16_t r) {
     auto pwm=[](int v){return v? (v<0?-1:1)*std::clamp(std::abs(v),700,1000):0;};
@@ -112,6 +122,19 @@ int main(int argc,char **argv) {
         sensors.timestamp_ms=num(s,"timestamp_ms",clock_ms);sensors.infrared_valid=true;sensors.ultrasonic_valid=flag(s,"ultrasonic_valid");
         sensors.ultrasonic_error=num(s,"ultrasonic_error",sensors.ultrasonic_valid?ESP_OK:ESP_ERR_TIMEOUT);sensors.distance_mm=num(s,"distance_mm");
         auto ir=get(s,"ir");sensors.infrared={(uint16_t)at(ir,0),(uint16_t)at(ir,1),(uint16_t)at(ir,2),(uint16_t)at(ir,3)};
+        if(nav_initialized && clock_ms>nav_last_ms) {
+            const float dt=std::min(0.1f,(float)(clock_ms-nav_last_ms)/1000.0f);
+            const float target=(left_motor+right_motor)*9.0f/2000.0f;
+            nav_speed+=(target-nav_speed)*std::min(1.0f,dt/0.10f);
+            motion_integrate_axle_pose(&nav_col,&nav_row,&nav_heading,nav_speed,
+                                       imu.sample.gyro_dps[2],
+                                       navigation_axle_offset_cells(vision.cell_mm),dt);
+        }
+        nav_last_ms=clock_ms;
+        if(vision.pose_valid && (!nav_initialized || vision.frame_timestamp_ms!=nav_frame_ms)) {
+            nav_col=vision.col;nav_row=vision.row;nav_heading=vision.theta_deg;
+            nav_frame_ms=vision.frame_timestamp_ms;nav_initialized=true;
+        }
         auto p=get(j,"peer");if(cJSON_IsObject(p)){
             last_peer=clock_ms;peer.connected=true;peer.mode=APP_MODE_COMPETITION;
             peer.competition_available=flag(p,"available");peer.competition_moving=flag(p,"moving");peer.competition_delivered_mask=num(p,"delivered");

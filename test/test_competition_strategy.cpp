@@ -17,15 +17,17 @@ int main(void)
     assert(COMPETITION_CUBE_DETECT_MM == 60U);
     assert(COMPETITION_CUBE_CLEARANCE_MM == 70U);
     assert(COMPETITION_CUBE_NEAR_CELLS == 6.0f);
-    assert(COMPETITION_CUBE_HELD_CELLS == 3.5f);
+    assert(COMPETITION_CUBE_HELD_CELLS == 4.2f);
     assert(!competition_cube_acquired(5.5f, 0, 100, 120, true, false, true));
     assert(!competition_cube_acquired(6.1f, 80, 100, 120, true, false, true));
     assert(!competition_cube_acquired(5.5f, 80, 100, 90, true, false, true));
     assert(!competition_cube_acquired(5.5f, 80, 100, 120, false, false, true));
     assert(competition_cube_acquired(5.5f, 80, 100, 120, true, false, true));
-    assert(competition_cube_acquired(3.4f, 0, 0, 0, false, false, false));
-    assert(!competition_cube_acquired(3.5f, 0, 0, 0, false, false, false));
-    assert(!competition_cube_acquired(3.5f, 80, 100, 120, true, true, false));
+    assert(competition_cube_acquired(4.1f, 0, 0, 0, false, false, false));
+    assert(!competition_cube_acquired(4.2f, 0, 0, 0, false, false, false));
+    assert(!competition_cube_acquired(4.2f, 80, 100, 120, true, true, false));
+    assert(competition_stopping_distance(9.0f) > competition_stopping_distance(4.5f));
+    assert(competition_stopping_distance(9.0f) > 2.0f);
     assert(COMPETITION_DETOUR_CELLS == 7.0f);
     assert(COMPETITION_DEPOT_APPROACH_CELLS == 2.5f);
     assert(competition_depot_needs_correction(2.5001f));
@@ -44,5 +46,11 @@ int main(void)
     assert(competition_assignment_line_hits_cube(0, 0, 10, 0, 5, 3.9f));
     assert(!competition_assignment_line_hits_cube(0, 0, 10, 0, 5, 4.1f));
     assert(!competition_assignment_line_hits_cube(0, 0, 10, 0, 5, 5));
+    // The closest of the two other cubes determines the direction: right
+    // means a left turn (+), left means a right turn (-).
+    assert(competition_last_cube_turn_direction(0, 0, 0, 5, 5, 15, -5) == 1);
+    assert(competition_last_cube_turn_direction(0, 0, 0, 5, -5, 15, 5) == -1);
+    assert(competition_last_cube_turn_direction(0, 0, 90, 5, 0, -15, 0) == 1);
+    assert(competition_last_cube_turn_direction(0, 0, 0, NAN, 0, 1, 1) == 0);
     return 0;
 }

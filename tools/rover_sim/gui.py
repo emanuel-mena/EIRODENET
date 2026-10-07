@@ -7,7 +7,7 @@ from .layout import apply_layout
 from .runner import Simulation
 from .world import MARKERS
 
-PHASES = ('Espera', 'Hacia cubo', 'Giro desvío', 'Avance desvío', 'Alinear depósito', 'Hacia depósito', 'Empuje', 'Terminado', 'Espera segura', 'Pausa por atasco', 'Espera visión', 'Retirada')
+PHASES = ('Espera', 'Hacia cubo', 'Giro desvío', 'Avance desvío', 'Alinear depósito', 'Hacia depósito', 'Empuje', 'Terminado', 'Espera segura', 'Pausa por atasco', 'Espera visión', 'Retirada', 'Preparar captura', 'Recolocar para reintento', 'Orientar parte trasera al centro', 'Retroceder hacia el centro')
 PALETTE = {'green':'#19845b','blue':'#2478d4','red':'#d75151','obstacle':'#e1b832'}
 
 

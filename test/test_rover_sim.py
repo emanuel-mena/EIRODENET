@@ -221,6 +221,37 @@ def test_gui_controls_and_reset(tmp_path,host_exe,monkeypatch):
     assert all(c.p.poll() is not None for c in w.sim.controllers)
 
 
+def test_gui_displays_cube_staging_phase(tmp_path,host_exe,monkeypatch):
+    monkeypatch.setenv('QT_QPA_PLATFORM','offscreen')
+    from PySide6.QtWidgets import QApplication
+    from rover_sim.gui import Window
+    app = QApplication.instance() or QApplication([])
+    w = Window(scenario(),tmp_path,host_exe)
+    try:
+        for _ in range(310):
+            w.sim.step()
+        assert w.sim.status[1]['phase'] == 12
+        w.refresh()
+        assert 'Preparar captura' in w.status_label.text()
+        for _ in range(420):
+            w.sim.step()
+        assert w.sim.status[0]['phase'] == 13
+        w.refresh()
+        assert 'Recolocar para reintento' in w.status_label.text()
+        while w.sim.status[1]['phase'] != 14 and w.sim.step_id < 1500:
+            w.sim.step()
+        assert w.sim.status[1]['phase'] == 14
+        w.refresh()
+        assert 'Orientar parte trasera al centro' in w.status_label.text()
+        while w.sim.status[1]['phase'] != 15 and w.sim.step_id < 1500:
+            w.sim.step()
+        assert w.sim.status[1]['phase'] == 15
+        w.refresh()
+        assert 'Retroceder hacia el centro' in w.status_label.text()
+    finally:
+        w.close()
+
+
 def test_current_firmware_dispatches_and_replays(tmp_path,host_exe):
     config = scenario()
     config['parameters']['vision_entropy'] = False
@@ -234,6 +265,105 @@ def test_current_firmware_dispatches_and_replays(tmp_path,host_exe):
     finally:
         sim.close()
     assert replay(tmp_path/'run/trace.ndjson',host_exe,tmp_path/'replay') == 800
+
+
+def test_repeated_camera_capture_brakes_before_cube(tmp_path,host_exe):
+    sim = Simulation(scenario(),tmp_path/'approach',host_exe)
+    stage_exit = None
+    previous = 0
+    try:
+        for _ in range(500):
+            snapshot = sim.step()
+            phase = sim.status[1]['phase']
+            if previous == 12 and phase == 1:
+                stage_exit = snapshot
+                break
+            previous = phase
+    finally:
+        sim.close()
+    assert stage_exit is not None
+    captures = [json.loads(line)['inputs'][1]['vision'] for line in
+                (tmp_path/'approach/trace.ndjson').read_text().splitlines()]
+    timestamps = [frame['ts_ms'] for frame in captures if frame is not None]
+    assert any(a == b for a,b in zip(timestamps,timestamps[1:]))
+    # The rover stopped before either its arms or body could push the cube.
+    assert math.dist(stage_exit['rovers'][1][:2],stage_exit['cubes'][2][:2]) >= 175
+    assert stage_exit['cubes'][2][:2] == [500,550]
+
+
+def test_cube_displacement_repositions_backward_for_1300_ms(tmp_path,host_exe):
+    sim = Simulation(scenario(),tmp_path/'backward',host_exe)
+    try:
+        for _ in range(870):
+            sim.step()
+    finally:
+        sim.close()
+    records = [json.loads(line) for line in
+               (tmp_path/'backward/trace.ndjson').read_text().splitlines()]
+    start = next(i for i,row in enumerate(records)
+                 if row['outputs'][0]['phase'] == 13)
+    end = next(i for i in range(start+1,len(records))
+               if records[i]['outputs'][0]['phase'] != 13)
+    commands = [(row['outputs'][0]['left'],row['outputs'][0]['right'])
+                for row in records[start:end] if row['outputs'][0]['left']]
+    assert commands == [(-700,-700)] * 130
+    assert records[end]['outputs'][0]['phase'] == 12
+
+
+def test_cube_displacement_uses_forward_when_reverse_exits_field(tmp_path,host_exe):
+    config = scenario()
+    config['parameters']['vision_entropy'] = False
+    sim = Simulation(config,tmp_path/'forward',host_exe)
+    original_frame = sim.world.frame
+    def displaced_frame(time_ms, sequence):
+        frame = original_frame(time_ms,sequence)
+        if time_ms >= 3300:
+            red = next(c for c in frame['cubes'] if c['color'] == 'red')
+            red['col'] += 2.5 if time_ms < 3400 else 2.6
+        return frame
+    sim.world.frame = displaced_frame
+    try:
+        for _ in range(480):
+            sim.step()
+            if sim.step_id == 339:
+                assert sim.status[1]['phase'] != 13
+    finally:
+        sim.close()
+    records = [json.loads(line) for line in
+               (tmp_path/'forward/trace.ndjson').read_text().splitlines()]
+    start = next(i for i,row in enumerate(records)
+                 if row['outputs'][1]['phase'] == 13)
+    end = next(i for i in range(start+1,len(records))
+               if records[i]['outputs'][1]['phase'] != 13)
+    commands = [(row['outputs'][1]['left'],row['outputs'][1]['right'])
+                for row in records[start:end] if row['outputs'][1]['left']]
+    assert commands == [(700,700)] * 130
+    assert records[end]['outputs'][1]['phase'] == 12
+
+
+def test_delivery_retreat_faces_rear_to_center_then_reverses(tmp_path,host_exe):
+    sim = Simulation(scenario(),tmp_path/'delivery-retreat',host_exe)
+    try:
+        for _ in range(1600):
+            sim.step()
+    finally:
+        sim.close()
+    records = [json.loads(line) for line in
+               (tmp_path/'delivery-retreat/trace.ndjson').read_text().splitlines()]
+    phase = lambda row: row['outputs'][1]['phase']
+    first_reverse = next(i for i,row in enumerate(records) if phase(row) == 11)
+    align = next(i for i in range(first_reverse+1,len(records)) if phase(records[i]) == 14)
+    toward_center = next(i for i in range(align+1,len(records)) if phase(records[i]) == 15)
+    end = next(i for i in range(toward_center+1,len(records)) if phase(records[i]) != 15)
+    commands = [(row['outputs'][1]['left'],row['outputs'][1]['right'])
+                for row in records[toward_center:end] if row['outputs'][1]['left']]
+    assert commands == [(-700,-700)] * 130
+    start_pose = records[toward_center]['world']['rovers'][1]
+    end_pose = records[end]['world']['rovers'][1]
+    outward = math.degrees(math.atan2(-(start_pose[1]-500),start_pose[0]-500)) % 360
+    angular_error = (start_pose[2]-outward+180) % 360-180
+    assert abs(angular_error) < 15
+    assert math.dist(end_pose[:2],[500,500]) < math.dist(start_pose[:2],[500,500])
 
 
 def test_ultrasonic_sampling_matches_firmware_period():
