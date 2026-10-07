@@ -42,6 +42,7 @@ typedef enum {
     EXEC_REPOSITION = 13,
     EXEC_ALIGN_REAR_TO_CENTER = 14,
     EXEC_REVERSE_TO_CENTER = 15,
+    EXEC_PUSH_WAIT_VISION = 16,
 } exec_phase_t;
 
 static const char *TAG = "competition_run";
@@ -77,6 +78,10 @@ static bool s_stall_anchor_valid;
 static uint64_t s_hold_ms;
 static uint64_t s_peer_block_since_ms;
 static uint32_t s_depot_frame_sequence;
+static uint32_t s_push_step_frame_sequence;
+static float s_push_step_anchor_col;
+static float s_push_step_anchor_row;
+static bool s_push_step_active;
 static uint64_t s_cube_clearance_timestamp_ms;
 static uint64_t s_cube_near_since_ms;
 static uint64_t s_reverse_started_ms;
@@ -241,6 +246,10 @@ static void begin_local_mission(const peer_mission_t *mission)
     s_center_reverse_last_drive_ms = 0;
     s_center_reverse_driven_ms = 0;
     s_depot_frame_sequence = 0;
+    s_push_step_frame_sequence = 0;
+    s_push_step_anchor_col = 0.0f;
+    s_push_step_anchor_row = 0.0f;
+    s_push_step_active = false;
     s_cube_clearance_timestamp_ms = 0;
     s_cube_near_since_ms = 0;
     s_commander_delay_started_ms = 0;
@@ -946,10 +955,25 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         return;
     }
     if (s_phase == EXEC_TO_DEPOT) {
+        if (delivered(v, color)) {
+            complete_delivery(v, role);
+            return;
+        }
+        const float cube_to_depot = distance(v->cubes[color].col,
+                                             v->cubes[color].row,
+                                             v->depot_col[color],
+                                             v->depot_row[color]);
+        if (cube_to_depot <= COMPETITION_DEPOT_STEP_START_CELLS) {
+            motor_adapter_stop();
+            s_push_step_active = false;
+            s_phase = EXEC_PUSH;
+            return;
+        }
         const float depot_distance = distance(v->col, v->row,
                                               v->depot_col[color], v->depot_row[color]);
         if (!competition_depot_needs_correction(depot_distance)) {
             motor_adapter_stop();
+            s_push_step_active = false;
             s_phase = EXEC_PUSH;
             return;
         }
@@ -985,14 +1009,55 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         }
         return;
     }
+    if (s_phase == EXEC_PUSH_WAIT_VISION) {
+        motor_adapter_stop();
+        if (!competition_vision_frame_is_new(v->sequence,
+                                              s_push_step_frame_sequence)) return;
+        if (delivered(v, color)) {
+            complete_delivery(v, role);
+            return;
+        }
+        s_push_step_active = false;
+        s_phase = EXEC_PUSH;
+        return;
+    }
     if (s_phase == EXEC_PUSH) {
         if (delivered(v, color)) {
             complete_delivery(v, role);
             return;
         }
+        const float cube_to_depot = distance(v->cubes[color].col,
+                                             v->cubes[color].row,
+                                             v->depot_col[color],
+                                             v->depot_row[color]);
+        if (cube_to_depot <= COMPETITION_DEPOT_STEP_START_CELLS) {
+            if (!s_push_step_active) {
+                s_push_step_anchor_col = v->cubes[color].col;
+                s_push_step_anchor_row = v->cubes[color].row;
+                s_push_step_frame_sequence = v->sequence;
+                s_push_step_active = true;
+            }
+            if (distance(v->cubes[color].col, v->cubes[color].row,
+                         s_push_step_anchor_col, s_push_step_anchor_row) >=
+                COMPETITION_DEPOT_STEP_CELLS) {
+                motor_adapter_stop();
+                s_phase = EXEC_PUSH_WAIT_VISION;
+                return;
+            }
+        } else {
+            s_push_step_active = false;
+        }
         if (role == COMPETITION_ROLE_SOLDIER) update_stall(v);
         if (s_phase == EXEC_STALL_PAUSE) return;
-        direct_drive(v, v->depot_col[color], v->depot_row[color], COMPETITION_DEPOT_SLOW_PWM);
+        if (cube_to_depot <= COMPETITION_DEPOT_STEP_START_CELLS) {
+            const uint32_t pulse_period = 100U / COMPETITION_DEPOT_STEP_DUTY_PERCENT;
+            if ((now_ms() / 10U) % pulse_period != 0U) {
+                motor_adapter_stop();
+                return;
+            }
+        }
+        direct_drive(v, v->depot_col[color], v->depot_row[color],
+                     COMPETITION_DEPOT_SLOW_PWM);
     }
 }
 
@@ -1030,6 +1095,10 @@ void competition_runtime_reset(void)
     s_hold_ms = 0;
     s_peer_block_since_ms = 0;
     s_depot_frame_sequence = 0;
+    s_push_step_frame_sequence = 0;
+    s_push_step_anchor_col = 0.0f;
+    s_push_step_anchor_row = 0.0f;
+    s_push_step_active = false;
     s_cube_clearance_timestamp_ms = 0;
     s_cube_near_since_ms = 0;
     s_reverse_started_ms = 0;
@@ -1075,6 +1144,7 @@ void competition_runtime_get_status(competition_runtime_status_t *status)
     if (s_local.color >= VISION_MAX_CUBES) return;
     if (s_phase == EXEC_ALIGN_DEPOT || s_phase == EXEC_TO_DEPOT ||
         s_phase == EXEC_DEPOT_WAIT_VISION || s_phase == EXEC_PUSH ||
+        s_phase == EXEC_PUSH_WAIT_VISION ||
         s_phase == EXEC_REVERSE_AFTER_DELIVERY) {
         status->target_col = v.depot_col[s_local.color];
         status->target_row = v.depot_row[s_local.color];
