@@ -21,6 +21,7 @@
 #define PEER_WAIT_MS 5000
 #define PEER_RETRY_MS 200
 #define PREFLIGHT_SETTLE_MS 300
+#define PREFLIGHT_FORWARD_MS 400
 #define PREFLIGHT_MAX_YAW_DEG 180.0f
 
 static const char *TAG = "competition";
@@ -28,13 +29,19 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static competition_status_t s_status;
 static competition_role_t s_role = COMPETITION_ROLE_NONE;
 static uint64_t s_phase_ms;
+static uint64_t s_return_duration_ms;
+static uint64_t s_line_start_ms;
+static uint64_t s_first_ir_event_ms;
 static uint64_t s_last_imu_timestamp_ms;
 static float s_yaw_integral_deg;
 static float s_motor_trim_pwm;
+static float s_imu_distance_cells;
+static uint16_t s_ir_stable_pattern;
+static uint16_t s_ir_candidate_pattern;
+static uint8_t s_ir_candidate_samples;
+static uint8_t s_ir_events;
+static bool s_have_ir_pattern;
 static bool s_have_imu_sample;
-static bool s_drive_calibration_running;
-static TaskHandle_t s_drive_calibration_task;
-static volatile bool s_drive_calibration_cancelled;
 
 static uint64_t now_ms(void) { return (uint64_t)(esp_timer_get_time() / 1000); }
 
@@ -56,6 +63,19 @@ static uint64_t mac_number(const uint8_t mac[6])
     return number;
 }
 
+static uint16_t ir_pattern(const infrared_adapter_state_t *ir)
+{
+    if (ir == NULL) return 0;
+    const uint16_t values[4] = {ir->front_left, ir->front_right,
+                                ir->rear_left, ir->rear_right};
+    uint16_t pattern = 0;
+    for (uint8_t i = 0; i < 4; ++i) {
+        const uint8_t bucket = (uint8_t)fminf(15.0f, values[i] / 256.0f);
+        pattern = (uint16_t)((pattern << 4) | bucket);
+    }
+    return pattern;
+}
+
 static void set_preflight_status(competition_preflight_phase_t phase,
                                  uint8_t failed_step, esp_err_t error)
 {
@@ -68,6 +88,7 @@ static void set_preflight_status(competition_preflight_phase_t phase,
     s_status.error = error;
     s_status.preflight_phase = phase;
     s_status.motor_trim_pwm = s_motor_trim_pwm;
+    s_status.ir_events = s_ir_events;
     taskEXIT_CRITICAL(&s_lock);
     app_mode_set_competition_indicator(failed_step, ready);
 }
@@ -82,7 +103,10 @@ static void publish_verification(uint8_t step, uint8_t failed_step,
     s_status.role = role;
     s_status.error = error;
     s_status.preflight_phase = COMPETITION_PREFLIGHT_IDLE;
-    s_status.motor_trim_pwm = s_motor_trim_pwm;
+    s_status.motor_trim_pwm = 0;
+    s_status.ir_speed_cells_s = 0;
+    s_status.imu_speed_cells_s = 0;
+    s_status.ir_events = 0;
     taskEXIT_CRITICAL(&s_lock);
     app_mode_set_competition_indicator(failed_step, false);
     if (failed_step != 0) {
@@ -99,7 +123,6 @@ void competition_service_get_status(competition_status_t *status)
     if (status == NULL) return;
     taskENTER_CRITICAL(&s_lock);
     *status = s_status;
-    status->drive_calibration_running = s_drive_calibration_running;
     taskEXIT_CRITICAL(&s_lock);
 }
 
@@ -127,11 +150,18 @@ static void reset_preflight(void)
 {
     motor_adapter_stop();
     s_phase_ms = now_ms();
+    s_return_duration_ms = 0;
+    s_line_start_ms = 0;
+    s_first_ir_event_ms = 0;
     s_last_imu_timestamp_ms = 0;
     s_yaw_integral_deg = 0;
-    drive_calibration_t calibration = {};
-    s_motor_trim_pwm = app_storage_get_drive_calibration(&calibration) == ESP_OK
-        ? calibration.motor_trim_pwm : 0.0f;
+    s_motor_trim_pwm = 0;
+    s_imu_distance_cells = 0;
+    s_ir_stable_pattern = 0;
+    s_ir_candidate_pattern = 0;
+    s_ir_candidate_samples = 0;
+    s_ir_events = 0;
+    s_have_ir_pattern = false;
     s_have_imu_sample = false;
 }
 
@@ -159,9 +189,38 @@ static void integrate_preflight_sample(const rover_imu_state_t *imu)
         const float dt = clamp_float((float)(imu->timestamp_ms - s_last_imu_timestamp_ms) / 1000.0f,
                                      0.001f, 0.1f);
         s_yaw_integral_deg += imu->sample.gyro_dps[2] * dt;
+        navigation_status_t navigation = {};
+        navigation_service_get_status(&navigation);
+        if (isfinite(navigation.linear_speed_cells_s) &&
+            navigation.linear_speed_cells_s > 0.0f)
+            s_imu_distance_cells += navigation.linear_speed_cells_s * dt;
     }
     s_last_imu_timestamp_ms = imu->timestamp_ms;
     s_have_imu_sample = true;
+}
+
+static bool new_stable_ir_pattern(const infrared_adapter_state_t *ir)
+{
+    const uint16_t pattern = ir_pattern(ir);
+    if (pattern != s_ir_candidate_pattern) {
+        s_ir_candidate_pattern = pattern;
+        s_ir_candidate_samples = 1;
+        return false;
+    }
+    if (s_ir_candidate_samples < 2) ++s_ir_candidate_samples;
+    if (s_ir_candidate_samples < 2 || (s_have_ir_pattern && pattern == s_ir_stable_pattern))
+        return false;
+    s_ir_stable_pattern = pattern;
+    s_have_ir_pattern = true;
+    return true;
+}
+
+static void corrected_forward_command(bool reverse)
+{
+    int16_t left = 0;
+    int16_t right = 0;
+    competition_trimmed_forward(s_motor_trim_pwm, reverse, &left, &right);
+    motor_adapter_set(left, right);
 }
 
 static void fail_preflight(esp_err_t error)
@@ -176,17 +235,13 @@ static void preflight_tick(uint32_t generation)
     const uint64_t now = now_ms();
     rover_imu_state_t imu = {};
     rover_sensor_state_t sensors = {};
-    rover_service_get_imu(&imu);
-    rover_service_get_sensors(&sensors);
-    const bool valid = imu.valid && imu.calibration_valid && imu.timestamp_ms != 0 &&
-                       sensors.infrared_valid && sensors.timestamp_ms != 0;
-    bool finite_imu = true;
-    for (float rate : imu.sample.gyro_dps) finite_imu = finite_imu && isfinite(rate);
+    const bool valid = sensors_ready(&imu, &sensors);
+    if (valid) integrate_preflight_sample(&imu);
 
     competition_status_t status = {};
     competition_service_get_status(&status);
     if (status.preflight_phase == COMPETITION_PREFLIGHT_FAILED || status.ready) return;
-    if (!valid || !finite_imu) {
+    if (!valid) {
         motor_adapter_stop();
         if (status.preflight_phase == COMPETITION_PREFLIGHT_WAIT_SENSORS &&
             now - s_phase_ms > PEER_WAIT_MS)
@@ -199,8 +254,81 @@ static void preflight_tick(uint32_t generation)
     switch (status.preflight_phase) {
         case COMPETITION_PREFLIGHT_WAIT_SENSORS:
             motor_adapter_stop();
+            if (!s_have_ir_pattern && !new_stable_ir_pattern(&sensors.infrared)) return;
             if (now - s_phase_ms < PREFLIGHT_SETTLE_MS) return;
-            set_preflight_status(COMPETITION_PREFLIGHT_COMPLETE, 0, ESP_OK);
+            s_phase_ms = now;
+            s_yaw_integral_deg = 0;
+            s_imu_distance_cells = 0;
+            s_last_imu_timestamp_ms = imu.timestamp_ms;
+            s_have_imu_sample = false;
+            set_preflight_status(COMPETITION_PREFLIGHT_FORWARD_TRIM, 0, ESP_OK);
+            return;
+        case COMPETITION_PREFLIGHT_FORWARD_TRIM:
+            corrected_forward_command(false);
+            if (now - s_phase_ms >= PREFLIGHT_FORWARD_MS) {
+                motor_adapter_stop();
+                if (!s_have_imu_sample || !isfinite(s_yaw_integral_deg) ||
+                    fabsf(s_yaw_integral_deg) > PREFLIGHT_MAX_YAW_DEG) {
+                    fail_preflight(ESP_ERR_INVALID_RESPONSE);
+                    return;
+                }
+                // Positive yaw means the right wheel is winning; leave the
+                // left wheel at full speed and reduce only the right wheel.
+                s_motor_trim_pwm = competition_trim_from_yaw(s_yaw_integral_deg);
+                s_return_duration_ms = PREFLIGHT_FORWARD_MS;
+                s_phase_ms = now;
+                s_yaw_integral_deg = 0;
+                s_last_imu_timestamp_ms = imu.timestamp_ms;
+                set_preflight_status(COMPETITION_PREFLIGHT_RETURN_TRIM, 0, ESP_OK);
+            }
+            return;
+        case COMPETITION_PREFLIGHT_RETURN_TRIM:
+            corrected_forward_command(true);
+            if (now - s_phase_ms >= s_return_duration_ms) {
+                motor_adapter_stop();
+                s_phase_ms = now;
+                s_line_start_ms = now;
+                s_first_ir_event_ms = 0;
+                s_ir_events = 0;
+                // Keep the stationary baseline; the first event must be a
+                // genuinely different stable pattern after the return.
+                s_ir_candidate_samples = 0;
+                s_imu_distance_cells = 0;
+                s_last_imu_timestamp_ms = imu.timestamp_ms;
+                s_have_imu_sample = false;
+                set_preflight_status(COMPETITION_PREFLIGHT_FORWARD_IR, 0, ESP_OK);
+            }
+            return;
+        case COMPETITION_PREFLIGHT_FORWARD_IR:
+            corrected_forward_command(false);
+            if (new_stable_ir_pattern(&sensors.infrared)) {
+                if (s_ir_events == 0) {
+                    s_first_ir_event_ms = now;
+                    s_ir_events = 1;
+                } else if (now > s_first_ir_event_ms) {
+                    s_ir_events = 2;
+                    const uint64_t interval = now - s_first_ir_event_ms;
+                    taskENTER_CRITICAL(&s_lock);
+                    s_status.ir_speed_cells_s = interval ? 1000.0f / interval : 0;
+                    s_status.imu_speed_cells_s = s_imu_distance_cells > 0 &&
+                        now > s_line_start_ms
+                        ? s_imu_distance_cells * 1000.0f / (now - s_line_start_ms) : 0;
+                    taskEXIT_CRITICAL(&s_lock);
+                    s_return_duration_ms = now - s_line_start_ms;
+                    motor_adapter_stop();
+                    s_phase_ms = now;
+                    s_last_imu_timestamp_ms = imu.timestamp_ms;
+                    set_preflight_status(COMPETITION_PREFLIGHT_RETURN_IR, 0, ESP_OK);
+                }
+            }
+            if (now - s_line_start_ms > 15000) fail_preflight(ESP_ERR_TIMEOUT);
+            return;
+        case COMPETITION_PREFLIGHT_RETURN_IR:
+            corrected_forward_command(true);
+            if (now - s_phase_ms >= s_return_duration_ms) {
+                motor_adapter_stop();
+                set_preflight_status(COMPETITION_PREFLIGHT_COMPLETE, 0, ESP_OK);
+            }
             return;
         default:
             return;
@@ -336,104 +464,4 @@ esp_err_t competition_service_start(void)
 {
     return xTaskCreate(competition_task, "competition", 12288, NULL, 4, NULL) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
-}
-
-static void drive_calibration_task(void *argument)
-{
-    (void)argument;
-    const uint32_t generation = app_mode_generation();
-    motor_adapter_stop();
-    vTaskDelay(pdMS_TO_TICKS(PREFLIGHT_SETTLE_MS));
-    if (s_drive_calibration_cancelled || app_mode_get() != APP_MODE_TEST ||
-        app_mode_generation() != generation) {
-        motor_adapter_stop();
-        s_drive_calibration_running = false;
-        s_drive_calibration_task = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-    rover_imu_state_t imu = {};
-    rover_sensor_state_t sensors = {};
-    rover_service_get_imu(&imu);
-    rover_service_get_sensors(&sensors);
-    const bool valid = app_mode_get() == APP_MODE_TEST && imu.valid &&
-        imu.calibration_valid && sensors.infrared_valid && imu.timestamp_ms != 0 &&
-        sensors.timestamp_ms != 0;
-    const uint64_t start = now_ms();
-    s_yaw_integral_deg = 0;
-    s_last_imu_timestamp_ms = valid ? imu.timestamp_ms : 0;
-    s_have_imu_sample = false;
-    esp_err_t err = valid ? motor_adapter_set(COMPETITION_FULL_PWM, COMPETITION_FULL_PWM)
-                          : ESP_ERR_INVALID_STATE;
-    while (err == ESP_OK && !s_drive_calibration_cancelled &&
-           app_mode_get() == APP_MODE_TEST && app_mode_generation() == generation &&
-           now_ms() - start < 400U) {
-        rover_service_get_imu(&imu);
-        if (!imu.valid || !imu.calibration_valid || !isfinite(imu.sample.gyro_dps[2])) {
-            err = ESP_ERR_INVALID_RESPONSE;
-            break;
-        }
-        integrate_preflight_sample(&imu);
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    motor_adapter_stop();
-    if (err == ESP_OK && !s_drive_calibration_cancelled &&
-        app_mode_get() == APP_MODE_TEST &&
-        app_mode_generation() == generation && s_have_imu_sample &&
-        isfinite(s_yaw_integral_deg) && fabsf(s_yaw_integral_deg) <= PREFLIGHT_MAX_YAW_DEG) {
-        drive_calibration_t calibration = {
-            .version = DRIVE_CALIBRATION_VERSION,
-            .valid = true,
-            .motor_trim_pwm = competition_trim_from_yaw(s_yaw_integral_deg),
-        };
-        err = app_storage_set_drive_calibration(&calibration);
-        if (err == ESP_OK) {
-            s_motor_trim_pwm = calibration.motor_trim_pwm;
-            taskENTER_CRITICAL(&s_lock);
-            s_status.motor_trim_pwm = s_motor_trim_pwm;
-            taskEXIT_CRITICAL(&s_lock);
-        }
-    } else if (err == ESP_OK) err = ESP_ERR_INVALID_RESPONSE;
-    if (err != ESP_OK) ESP_LOGW(TAG, "Calibración de motores no guardada: %s",
-                                esp_err_to_name(err));
-    s_drive_calibration_running = false;
-    s_drive_calibration_task = NULL;
-    taskENTER_CRITICAL(&s_lock);
-    s_status.drive_calibration_running = false;
-    taskEXIT_CRITICAL(&s_lock);
-    vTaskDelete(NULL);
-}
-
-esp_err_t competition_service_drive_calibration_start(void)
-{
-    if (app_mode_get() != APP_MODE_TEST || s_drive_calibration_running)
-        return ESP_ERR_INVALID_STATE;
-    navigation_service_cancel(NAVIGATION_CANCEL_MANUAL);
-    s_drive_calibration_running = true;
-    taskENTER_CRITICAL(&s_lock);
-    s_status.drive_calibration_running = true;
-    taskEXIT_CRITICAL(&s_lock);
-    s_drive_calibration_cancelled = false;
-    if (xTaskCreate(drive_calibration_task, "drive_cal", 3072, NULL, 4,
-                    &s_drive_calibration_task) != pdPASS) {
-        s_drive_calibration_running = false;
-        taskENTER_CRITICAL(&s_lock);
-        s_status.drive_calibration_running = false;
-        taskEXIT_CRITICAL(&s_lock);
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
-}
-
-esp_err_t competition_service_drive_calibration_stop(void)
-{
-    if (!s_drive_calibration_running) return ESP_ERR_INVALID_STATE;
-    s_drive_calibration_cancelled = true;
-    motor_adapter_stop();
-    return ESP_OK;
-}
-
-bool competition_service_drive_calibration_running(void)
-{
-    return s_drive_calibration_running;
 }

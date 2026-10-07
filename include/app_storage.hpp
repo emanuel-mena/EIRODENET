@@ -13,7 +13,6 @@
 #define APP_STORAGE_WIFI_PASSWORD_MAX_LENGTH 64
 #define APP_STORAGE_IPV4_MAX_LENGTH 15
 #define IMU_CALIBRATION_VERSION 2U
-#define DRIVE_CALIBRATION_VERSION 1U
 #define APP_STORAGE_ROVER_UNCONFIGURED 0U
 #define APP_STORAGE_ROVER_10 10U
 #define APP_STORAGE_ROVER_11 11U
@@ -26,12 +25,6 @@ typedef struct {
     float accel_scale[3];
     float gyro_bias_dps[3];
 } imu_calibration_t;
-
-typedef struct {
-    uint32_t version;
-    bool valid;
-    float motor_trim_pwm;
-} drive_calibration_t;
 
 /** @brief Configuración completa y persistente del rover. */
 typedef struct {
@@ -101,5 +94,3 @@ esp_err_t app_storage_get_imu_calibration(imu_calibration_t *calibration);
 
 /** @brief Valida y guarda la calibración IMU. */
 esp_err_t app_storage_set_imu_calibration(const imu_calibration_t *calibration);
-esp_err_t app_storage_get_drive_calibration(drive_calibration_t *calibration);
-esp_err_t app_storage_set_drive_calibration(const drive_calibration_t *calibration);

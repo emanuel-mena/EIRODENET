@@ -186,27 +186,6 @@ class MainWindow(QMainWindow):
         motor_warning.setWordWrap(True)
         motor_warning.setStyleSheet("color: #b45309; font-weight: 600")
         layout.addWidget(motor_warning)
-        drive_box = QGroupBox("Calibración de motores para competencia")
-        drive_layout = QVBoxLayout(drive_box)
-        drive_help = QLabel(
-            "Suspenda el rover con las ruedas libres. La prueba mueve ambos motores "
-            "durante 0,4 s para medir el drift del giroscopio Z y guarda el trim en la memoria del rover.")
-        drive_help.setWordWrap(True); drive_layout.addWidget(drive_help)
-        drive_buttons = QHBoxLayout()
-        self.drive_calibration_start = QPushButton("Calibrar drift")
-        self.drive_calibration_start.clicked.connect(
-            lambda: self.send_command("drive_calibration.start"))
-        self.drive_calibration_stop = QPushButton("Detener")
-        self.drive_calibration_stop.clicked.connect(
-            lambda: self.send_command("drive_calibration.stop"))
-        self.drive_calibration_stop.setEnabled(False)
-        drive_buttons.addWidget(self.drive_calibration_start)
-        drive_buttons.addWidget(self.drive_calibration_stop)
-        drive_layout.addLayout(drive_buttons)
-        self.drive_calibration_status = QLabel("Trim guardado: consultar configuración")
-        drive_layout.addWidget(self.drive_calibration_status)
-        drive_layout.addWidget(QLabel("La celda se toma de la calibración de visión (cell_mm)."))
-        layout.addWidget(drive_box)
         self.config_status = QLabel("")
         layout.addWidget(self.config_status); layout.addStretch()
         return page
@@ -364,9 +343,6 @@ class MainWindow(QMainWindow):
             self.server_ip.setText(data.get("server_ipv4", ""))
             port = data.get("server_port", 0); self.server_port.setText(str(port) if port else "")
             self.peer_mac.setText(data.get("peer_mac", ""))
-            self.drive_calibration_status.setText(
-                f"Trim guardado: {data.get('motor_trim_pwm', 0):+.0f} PWM" if
-                data.get("drive_calibration_valid") else "Sin calibración de drift guardada")
             self.config_status.setText("Configuración leída correctamente")
         elif command == "config.set":
             text = "Configuración guardada"
@@ -376,12 +352,6 @@ class MainWindow(QMainWindow):
             duration = int(data.get("duration_ms", 1000)) / 1000
             self.config_status.setText(
                 f"Prueba iniciada por {duration:g} s; los motores se detendrán automáticamente")
-        elif command == "drive_calibration.start":
-            self.drive_calibration_start.setEnabled(False)
-            self.drive_calibration_stop.setEnabled(True)
-            self.drive_calibration_status.setText("Midiendo drift; los motores se detendrán automáticamente…")
-        elif command == "drive_calibration.stop":
-            self.drive_calibration_stop.setEnabled(False)
         self.statusBar().showMessage(f"{command}: correcto", 3000)
 
     @staticmethod
@@ -421,16 +391,6 @@ class MainWindow(QMainWindow):
                 self.value_labels["Color"].setText(" / ".join(str(int(value)) for value in row)); self.color_plot.add(row)
             else: self.value_labels["Color"].setText(f"Error {color.get('error')}")
         elif topic == "status":
-            competition = message.get("competition", {})
-            trim = competition.get("stored_motor_trim_pwm", 0.0)
-            calibrated = competition.get("drive_calibration_valid", False)
-            cell_mm = competition.get("cell_mm", 0.0)
-            running = competition.get("drive_calibration_running", False)
-            self.drive_calibration_start.setEnabled(not running)
-            self.drive_calibration_stop.setEnabled(running)
-            self.drive_calibration_status.setText(
-                (f"Trim guardado: {trim:+.0f} PWM" if calibrated else "Sin calibración de drift guardada") +
-                (f" · celda de visión: {cell_mm:.1f} mm" if cell_mm > 0 else " · celda de visión: sin dato"))
             if message.get("wifi_connected"):
                 self.value_labels["Wi-Fi"].setText(
                     f"{message.get('local_ipv4')}  RSSI {message.get('rssi')} dBm")

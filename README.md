@@ -259,12 +259,12 @@ puede agregar `--synthetic`; `--no-start` exige que el servidor ya esté activo.
 
 El firmware siempre inicia en modo prueba. Sólo una pulsación local de BOOT cambia a
 competencia; una orden ESP-NOW remota nunca puede activar ese cambio. Cada transición
-detiene los motores. Antes de declarar READY, el rover valida sensores sin mover los
-motores y carga el trim diferencial guardado en NVS. La calibración de drift se inicia
-únicamente desde la GUI en modo prueba; el ensayo mueve ambos motores durante 0,4 s y
-guarda el ajuste sólo si la medición del IMU es válida. La longitud de celda se obtiene
-del flujo de visión (`cell_mm`) y se usa directamente en la navegación. La consigna de
-media potencia es 700/1000.
+detiene los motores. Antes de declarar READY, el rover ejecuta un preflight no
+bloqueante: avanza a PWM 1000 durante 0,4 segundos, integra la deriva de yaw, calcula
+trim diferencial manteniendo un motor en 1000, vuelve al origen por tiempo, repite el
+avance con trim, valida cambios de patrón IR estables durante dos lecturas, compara
+la velocidad IR con la IMU y vuelve al origen. Un fallo de IMU, IR o deriva bloquea
+la competencia. La consigna de media potencia es 700/1000.
 
 La competencia espera READY y sólo mueve motores en RUNNING. El comandante asigna
 el cubo más cercano a su posición y el soldado el más lejano, salvo que la línea

@@ -8,7 +8,6 @@
 #include "cJSON.h"
 #include "competition_service.hpp"
 #include "competition_runtime.hpp"
-#include "navigation_geometry.hpp"
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -121,11 +120,6 @@ static void handle_config_get(double id)
         config.peer_mac[0], config.peer_mac[1], config.peer_mac[2], config.peer_mac[3],
         config.peer_mac[4], config.peer_mac[5]);
     cJSON_AddStringToObject(data, "peer_mac", mac);
-    drive_calibration_t drive_calibration = {};
-    const esp_err_t drive_err = app_storage_get_drive_calibration(&drive_calibration);
-    cJSON_AddBoolToObject(data, "drive_calibration_valid", drive_err == ESP_OK);
-    cJSON_AddNumberToObject(data, "motor_trim_pwm",
-                            drive_err == ESP_OK ? drive_calibration.motor_trim_pwm : 0.0f);
     respond_ok(id, data);
 }
 
@@ -205,14 +199,6 @@ static void handle_request(cJSON *root)
     }
     static const char *const simple_allowed[] = {"v", "id", "cmd"};
     if (strcmp(cmd->valuestring, "config.set") == 0) { handle_config_set(id, root); return; }
-    if (strcmp(cmd->valuestring, "drive_calibration.start") == 0 ||
-        strcmp(cmd->valuestring, "drive_calibration.stop") == 0) {
-        esp_err_t err = strcmp(cmd->valuestring, "drive_calibration.start") == 0
-            ? competition_service_drive_calibration_start()
-            : competition_service_drive_calibration_stop();
-        if (err == ESP_OK) respond_ok(id, NULL); else respond_error(id, "drive_calibration", err);
-        return;
-    }
     if (strcmp(cmd->valuestring, "calibration.capture") == 0) {
         static const char *const allowed[] = {"v", "id", "cmd", "face"};
         const cJSON *face = cJSON_GetObjectItemCaseSensitive(root, "face");
@@ -349,17 +335,9 @@ static void emit_status(void)
     cJSON_AddNumberToObject(competition_json, "role", competition.role);
     cJSON_AddNumberToObject(competition_json, "preflight_phase", competition.preflight_phase);
     cJSON_AddNumberToObject(competition_json, "motor_trim_pwm", competition.motor_trim_pwm);
-    drive_calibration_t drive_calibration = {};
-    const esp_err_t drive_err = app_storage_get_drive_calibration(&drive_calibration);
-    cJSON_AddBoolToObject(competition_json, "drive_calibration_valid", drive_err == ESP_OK);
-    cJSON_AddBoolToObject(competition_json, "drive_calibration_running",
-                          competition.drive_calibration_running);
-    cJSON_AddNumberToObject(competition_json, "stored_motor_trim_pwm",
-                            drive_err == ESP_OK ? drive_calibration.motor_trim_pwm : 0.0f);
-    vision_status_t vision = {};
-    vision_service_get_status(&vision);
-    cJSON_AddNumberToObject(competition_json, "cell_mm",
-                            navigation_cell_mm(vision.cell_mm));
+    cJSON_AddNumberToObject(competition_json, "ir_speed_cells_s", competition.ir_speed_cells_s);
+    cJSON_AddNumberToObject(competition_json, "imu_speed_cells_s", competition.imu_speed_cells_s);
+    cJSON_AddNumberToObject(competition_json, "ir_events", competition.ir_events);
     competition_runtime_status_t runtime = {};
     competition_runtime_get_status(&runtime);
     cJSON *runtime_json = cJSON_AddObjectToObject(competition_json, "runtime");
