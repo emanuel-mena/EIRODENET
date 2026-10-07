@@ -32,21 +32,32 @@
 #define COMPETITION_REPOSITION_MS 1300U
 #define COMPETITION_REPOSITION_SPEED_CELLS_S 6.3f
 
-static inline int competition_last_cube_turn_direction(
-    float rover_col, float rover_row, float heading_deg,
-    float first_col, float first_row, float second_col, float second_row)
+typedef struct {
+    float col;
+    float row;
+} competition_turn_obstacle_t;
+
+// Zero leaves turn_to free to use the shortest rotation. Positive turns left.
+static inline int competition_capture_turn_direction(
+    float axle_col, float axle_row, float heading_deg, float radius_cells,
+    const competition_turn_obstacle_t *obstacles, size_t count)
 {
-    const float first_distance = hypotf(first_col - rover_col, first_row - rover_row);
-    const float second_distance = hypotf(second_col - rover_col, second_row - rover_row);
-    if (!isfinite(first_distance) || !isfinite(second_distance) ||
-        !isfinite(heading_deg)) return 0;
-    const bool first_nearest = first_distance <= second_distance;
-    const float nearest_col = first_nearest ? first_col : second_col;
-    const float nearest_row = first_nearest ? first_row : second_row;
-    const float bearing = atan2f(-(nearest_row - rover_row),
-                                  nearest_col - rover_col) * 57.2957795f;
-    const float relative = remainderf(bearing - heading_deg, 360.0f);
-    return relative < 0.0f ? 1 : -1;
+    if (!isfinite(axle_col) || !isfinite(axle_row) || !isfinite(heading_deg) ||
+        !isfinite(radius_cells) || radius_cells <= 0 || !obstacles) return 0;
+    const float a = heading_deg * 0.01745329252f;
+    float left_risk = 0, right_risk = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const float dx = obstacles[i].col - axle_col;
+        const float dy = obstacles[i].row - axle_row;
+        const float d = hypotf(dx, dy);
+        if (!isfinite(d) || d >= radius_cells || d < 0.001f) continue;
+        const float left = -dx * sinf(a) - dy * cosf(a);
+        const float risk = (radius_cells - d) / radius_cells;
+        if (left > 0.001f) left_risk += risk;
+        else if (left < -0.001f) right_risk += risk;
+    }
+    if (fabsf(left_risk - right_risk) < 0.001f) return 0;
+    return left_risk > right_risk ? -1 : 1;
 }
 
 static inline float competition_stopping_distance(float speed_cells_s)

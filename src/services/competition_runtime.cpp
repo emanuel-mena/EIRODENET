@@ -99,10 +99,11 @@ static uint32_t s_reposition_driven_ms;
 static uint64_t s_center_reverse_last_drive_ms;
 static uint32_t s_center_reverse_driven_ms;
 static bool s_first_delivery_retreat;
-static bool s_last_cube_mission;
-static int8_t s_last_cube_turn_direction;
+static int8_t s_capture_turn_direction;
+static bool s_capture_turn_chosen;
 static bool s_last_cube_turn_near_goal;
 static bool s_cube_straight_active;
+static bool s_cube_held;
 static float s_cube_straight_start_col;
 static float s_cube_straight_start_row;
 static float s_cube_straight_heading;
@@ -232,8 +233,8 @@ static peer_mission_t mission_for(const vision_status_t *v, uint8_t color)
 static void begin_local_mission(const peer_mission_t *mission)
 {
     if (mission == NULL || mission->id == 0) return;
-    s_last_cube_mission = s_local.id != 0 && s_delivered_mask != 0;
-    s_last_cube_turn_direction = 0;
+    s_capture_turn_direction = 0;
+    s_capture_turn_chosen = false;
     s_last_cube_turn_near_goal = false;
     s_local = *mission;
     s_assigned_mask |= (uint8_t)(1U << mission->color);
@@ -395,9 +396,10 @@ static bool turn_to(const vision_status_t *v, float target, int max_pwm,
         motor_adapter_stop();
         return false;
     }
-    if (half_speed && tick % 16U >= 8U) {
-        // The motor driver raises nonzero commands below 700 to 700. Pulse at
-        // 700 to halve the average turn drive without using an ineffective PWM.
+    if ((s_cube_held && tick % 32U >= 8U) ||
+        (!s_cube_held && half_speed && tick % 16U >= 8U)) {
+        // The driver raises commands below 700 to 700. After capture, limit
+        // turns to 80 ms on and 240 ms off instead of requesting unusable PWM.
         motor_adapter_stop();
         return false;
     }
@@ -407,21 +409,34 @@ static bool turn_to(const vision_status_t *v, float target, int max_pwm,
     return false;
 }
 
-static int8_t turn_away_from_nearest_cube(const vision_status_t *v, uint8_t target_color)
+static int8_t capture_turn_direction(const vision_status_t *v, uint8_t target_color)
 {
-    uint8_t other[2] = {UINT8_MAX, UINT8_MAX};
-    uint8_t found = 0;
+    const float cell_mm = navigation_cell_mm(v->cell_mm);
+    float axle_col, axle_row;
+    navigation_axle_from_center(v->col, v->row, current_heading(v), cell_mm,
+                                &axle_col, &axle_row);
+    // The circle encloses the outer arm tips and the carried cube about the
+    // actual motor axle, with 10 mm of clearance.
+    const float arm_radius_mm = hypotf(130.0f, 50.0f);
+    const float cube_radius_mm = distance(axle_col, axle_row,
+                                          v->cubes[target_color].col,
+                                          v->cubes[target_color].row) * cell_mm +
+                                 v->cube_side * cell_mm * 0.70710678f;
+    const float radius_cells = (fmaxf(arm_radius_mm, cube_radius_mm) + 10.0f) / cell_mm;
+    competition_turn_obstacle_t nearby[VISION_MAX_OBSTACLES + VISION_MAX_CUBES + 1] = {};
+    size_t count = 0;
     for (uint8_t color = 0; color < VISION_MAX_CUBES; ++color) {
         if (color == target_color || !v->cube_valid[color] ||
             v->cubes[color].age_ms > FRESH_MS) continue;
-        if (found < 2) other[found] = color;
-        ++found;
+        nearby[count++] = {v->cubes[color].col, v->cubes[color].row};
     }
-    if (found != 2) return 0;
-    return (int8_t)competition_last_cube_turn_direction(
-        v->col, v->row, current_heading(v),
-        v->cubes[other[0]].col, v->cubes[other[0]].row,
-        v->cubes[other[1]].col, v->cubes[other[1]].row);
+    if (v->peer_valid && v->peer_age_ms <= FRESH_MS)
+        nearby[count++] = {v->peer_col, v->peer_row};
+    for (uint8_t i = 0; i < v->obstacle_count && i < VISION_MAX_OBSTACLES; ++i)
+        if (v->obstacles[i].age_ms <= FRESH_MS)
+            nearby[count++] = {v->obstacles[i].col, v->obstacles[i].row};
+    return (int8_t)competition_capture_turn_direction(
+        axle_col, axle_row, current_heading(v), radius_cells, nearby, count);
 }
 
 static void direct_drive(const vision_status_t *v, float target_col, float target_row,
@@ -625,6 +640,7 @@ static void complete_delivery(const vision_status_t *v, competition_role_t role)
 {
     const uint8_t color = s_local.color;
     stop();
+    s_cube_held = false;
     peer_comms_status_t peer = {};
     peer_comms_service_get_status(&peer);
     bool other_cube_delivered = false;
@@ -729,7 +745,9 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         if (role == COMPETITION_ROLE_COMMANDER && s_commander_delay_started_ms == 0) {
             peer_comms_status_t peer = {};
             peer_comms_service_get_status(&peer);
-            if (!peer.competition_moving) return;
+            // Only the initial launch waits for the soldier. On the reserve
+            // mission the soldier may already be done and stationary.
+            if (s_delivered_mask == 0 && !peer.competition_moving) return;
             s_commander_delay_started_ms = now_ms();
         }
         if (role == COMPETITION_ROLE_COMMANDER &&
@@ -852,9 +870,9 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
                                       sensors.ultrasonic_error == ESP_ERR_TIMEOUT) && cube_ahead) {
             motor_adapter_stop();
             s_cube_straight_active = false;
+            s_cube_held = true;
             s_phase = EXEC_ALIGN_DEPOT;
-            s_last_cube_turn_direction = s_last_cube_mission
-                ? turn_away_from_nearest_cube(v, color) : 0;
+            s_capture_turn_chosen = false;
             s_last_cube_turn_near_goal = false;
             s_stall_anchor_valid = false;
             ESP_LOGI(TAG, "Cubo recogido: color=%u distancia=%.2f confirmacion=%s",
@@ -922,17 +940,14 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         return;
     }
     if (s_phase == EXEC_ALIGN_DEPOT) {
-        if (s_last_cube_mission && s_last_cube_turn_direction == 0) {
-            s_last_cube_turn_direction = turn_away_from_nearest_cube(v, color);
-            if (s_last_cube_turn_direction == 0) {
-                motor_adapter_stop();
-                return;
-            }
+        if (!s_capture_turn_chosen) {
+            s_capture_turn_direction = capture_turn_direction(v, color);
+            s_capture_turn_chosen = true;
         }
         const float target = atan2f(-(v->depot_row[color] - v->row),
                                     v->depot_col[color] - v->col) * 57.2957795f;
         if (turn_to(v, target, COMPETITION_HALF_PWM, true,
-                    s_last_cube_turn_direction)) {
+                    s_capture_turn_direction)) {
             s_depot_frame_sequence = v->sequence;
             s_phase = EXEC_TO_DEPOT;
             s_stall_since_ms = 0;
@@ -983,6 +998,8 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         return;
     }
     if (s_phase == EXEC_DEPOT_WAIT_VISION) {
+        s_capture_turn_chosen = false;
+        s_last_cube_turn_near_goal = false;
         s_phase = EXEC_ALIGN_DEPOT;
         return;
     }
@@ -1073,10 +1090,11 @@ void competition_runtime_reset(void)
     s_center_reverse_last_drive_ms = 0;
     s_center_reverse_driven_ms = 0;
     s_first_delivery_retreat = false;
-    s_last_cube_mission = false;
-    s_last_cube_turn_direction = 0;
+    s_capture_turn_direction = 0;
+    s_capture_turn_chosen = false;
     s_last_cube_turn_near_goal = false;
     s_cube_straight_active = false;
+    s_cube_held = false;
     s_stall_since_ms = 0;
     s_stall_anchor_valid = false;
     s_hold_ms = 0;

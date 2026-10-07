@@ -238,14 +238,14 @@ def test_gui_displays_cube_staging_phase(tmp_path,host_exe,monkeypatch):
         assert w.sim.status[0]['phase'] == 12
         w.refresh()
         assert 'Aproximación directa al cubo' in w.status_label.text()
-        while w.sim.status[1]['phase'] != 14 and w.sim.step_id < 1500:
+        while w.sim.status[0]['phase'] != 14 and w.sim.step_id < 3000:
             w.sim.step()
-        assert w.sim.status[1]['phase'] == 14
+        assert w.sim.status[0]['phase'] == 14
         w.refresh()
         assert 'Orientar parte trasera al centro' in w.status_label.text()
-        while w.sim.status[1]['phase'] != 15 and w.sim.step_id < 1500:
+        while w.sim.status[0]['phase'] != 15 and w.sim.step_id < 3000:
             w.sim.step()
-        assert w.sim.status[1]['phase'] == 15
+        assert w.sim.status[0]['phase'] == 15
         w.refresh()
         assert 'Retroceder hacia el centro' in w.status_label.text()
     finally:
@@ -345,26 +345,47 @@ def test_cube_displacement_uses_forward_when_reverse_exits_field(tmp_path,host_e
 def test_delivery_retreat_faces_rear_to_center_then_reverses(tmp_path,host_exe):
     sim = Simulation(scenario(),tmp_path/'delivery-retreat',host_exe)
     try:
-        for _ in range(1600):
+        for _ in range(2700):
             sim.step()
     finally:
         sim.close()
     records = [json.loads(line) for line in
                (tmp_path/'delivery-retreat/trace.ndjson').read_text().splitlines()]
-    phase = lambda row: row['outputs'][1]['phase']
+    phase = lambda row: row['outputs'][0]['phase']
+    carrying_turns = [row for row in records if phase(row) == 4 and
+                      row['outputs'][0]['left'] * row['outputs'][0]['right'] < 0]
+    assert carrying_turns
+    assert all(row['step'] % 32 < 8 for row in carrying_turns)
     first_reverse = next(i for i,row in enumerate(records) if phase(row) == 11)
     align = next(i for i in range(first_reverse+1,len(records)) if phase(records[i]) == 14)
     toward_center = next(i for i in range(align+1,len(records)) if phase(records[i]) == 15)
     end = next(i for i in range(toward_center+1,len(records)) if phase(records[i]) != 15)
-    commands = [(row['outputs'][1]['left'],row['outputs'][1]['right'])
-                for row in records[toward_center:end] if row['outputs'][1]['left']]
+    commands = [(row['outputs'][0]['left'],row['outputs'][0]['right'])
+                for row in records[toward_center:end] if row['outputs'][0]['left']]
     assert commands == [(-700,-700)] * 130
-    start_pose = records[toward_center]['world']['rovers'][1]
-    end_pose = records[end]['world']['rovers'][1]
+    start_pose = records[toward_center]['world']['rovers'][0]
+    end_pose = records[end]['world']['rovers'][0]
     outward = math.degrees(math.atan2(-(start_pose[1]-500),start_pose[0]-500)) % 360
     angular_error = (start_pose[2]-outward+180) % 360-180
     assert abs(angular_error) < 15
     assert math.dist(end_pose[:2],[500,500]) < math.dist(start_pose[:2],[500,500])
+
+
+def test_reserve_mission_starts_after_both_initial_deliveries(tmp_path,host_exe):
+    config = apply_layout(scenario(),1,.2)
+    sim = Simulation(config,tmp_path/'reserve',host_exe)
+    try:
+        for _ in range(2300):
+            sim.step()
+    finally:
+        sim.close()
+    records = [json.loads(line) for line in
+               (tmp_path/'reserve/trace.ndjson').read_text().splitlines()]
+    both_done = next(i for i,row in enumerate(records)
+                     if [out['phase'] for out in row['outputs']] == [7,7])
+    assert any(row['outputs'][0]['phase'] == 12 and
+               row['outputs'][0]['target_color'] == 2
+               for row in records[both_done+1:])
 
 
 def test_ultrasonic_sampling_matches_firmware_period():

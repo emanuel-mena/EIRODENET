@@ -46,11 +46,11 @@ int main(void)
     assert(competition_assignment_line_hits_cube(0, 0, 10, 0, 5, 3.9f));
     assert(!competition_assignment_line_hits_cube(0, 0, 10, 0, 5, 4.1f));
     assert(!competition_assignment_line_hits_cube(0, 0, 10, 0, 5, 5));
-    // The closest of the two other cubes determines the direction: right
-    // means a left turn (+), left means a right turn (-).
-    assert(competition_last_cube_turn_direction(0, 0, 0, 5, 5, 15, -5) == 1);
-    assert(competition_last_cube_turn_direction(0, 0, 0, 5, -5, 15, 5) == -1);
-    assert(competition_last_cube_turn_direction(0, 0, 90, 5, 0, -15, 0) == 1);
-    assert(competition_last_cube_turn_direction(0, 0, 0, NAN, 0, 1, 1) == 0);
+    const competition_turn_obstacle_t turn_obstacles[] = {{4, -3}, {20, 3}};
+    assert(competition_capture_turn_direction(0, 0, 0, 8, turn_obstacles, 2) == -1);
+    assert(competition_capture_turn_direction(0, 0, 0, 4, turn_obstacles, 2) == 0);
+    const competition_turn_obstacle_t right_obstacle[] = {{4, 3}};
+    assert(competition_capture_turn_direction(0, 0, 0, 8, right_obstacle, 1) == 1);
+    assert(competition_capture_turn_direction(0, 0, 0, NAN, right_obstacle, 1) == 0);
     return 0;
 }
