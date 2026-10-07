@@ -18,6 +18,7 @@
 #define SERVER_PORT_KEY "server_port"
 #define PEER_MAC_KEY "peer_mac"
 #define IMU_CAL_KEY "imu_cal"
+#define DRIVE_CAL_KEY "drive_cal"
 
 static bool s_initialized;
 
@@ -278,6 +279,41 @@ esp_err_t app_storage_set_imu_calibration(const imu_calibration_t *calibration)
     esp_err_t err = open_storage(NVS_READWRITE, &handle);
     if (err != ESP_OK) return err;
     err = nvs_set_blob(handle, IMU_CAL_KEY, calibration, sizeof(*calibration));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+static bool valid_drive_calibration(const drive_calibration_t *calibration)
+{
+    return calibration != NULL && calibration->version == DRIVE_CALIBRATION_VERSION &&
+           calibration->valid && isfinite(calibration->motor_trim_pwm) &&
+           fabsf(calibration->motor_trim_pwm) <= 300.0f;
+}
+
+esp_err_t app_storage_get_drive_calibration(drive_calibration_t *calibration)
+{
+    if (calibration == NULL) return ESP_ERR_INVALID_ARG;
+    memset(calibration, 0, sizeof(*calibration));
+    nvs_handle_t handle;
+    esp_err_t err = open_storage(NVS_READONLY, &handle);
+    if (err != ESP_OK) return err;
+    size_t size = sizeof(*calibration);
+    err = nvs_get_blob(handle, DRIVE_CAL_KEY, calibration, &size);
+    nvs_close(handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_ERR_NOT_FOUND;
+    if (err != ESP_OK) return err;
+    return size == sizeof(*calibration) && valid_drive_calibration(calibration)
+        ? ESP_OK : ESP_ERR_INVALID_CRC;
+}
+
+esp_err_t app_storage_set_drive_calibration(const drive_calibration_t *calibration)
+{
+    if (!valid_drive_calibration(calibration)) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t handle;
+    esp_err_t err = open_storage(NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_blob(handle, DRIVE_CAL_KEY, calibration, sizeof(*calibration));
     if (err == ESP_OK) err = nvs_commit(handle);
     nvs_close(handle);
     return err;
