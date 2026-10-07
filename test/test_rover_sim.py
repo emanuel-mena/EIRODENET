@@ -370,6 +370,26 @@ def test_carried_cube_detours_away_from_blocking_cube(tmp_path,host_exe):
     assert error*blocker_left < 0
 
 
+def test_seed_one_red_delivery_blockage_triggers_recovery(tmp_path,host_exe):
+    from rover_sim.layout import apply_layout
+    config = scenario()
+    apply_layout(config, 1, .30)
+    sim = Simulation(config,tmp_path/'seed-one-recovery',host_exe)
+    try:
+        for _ in range(1600):
+            sim.step()
+    finally:
+        sim.close()
+    records = [json.loads(line) for line in
+               (tmp_path/'seed-one-recovery/trace.ndjson').read_text().splitlines()]
+    phases = [row['outputs'][1]['phase'] for row in records]
+    assert 21 in phases
+    assert 22 in phases
+    assert 18 in phases
+    assert any(row['outputs'][1]['left'] or row['outputs'][1]['right']
+               for row in records[655:])
+
+
 def test_delivery_retreat_faces_rear_to_center_then_reverses(tmp_path,host_exe):
     sim = Simulation(scenario(),tmp_path/'delivery-retreat',host_exe)
     try:

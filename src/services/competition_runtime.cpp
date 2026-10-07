@@ -47,6 +47,8 @@ typedef enum {
     EXEC_DEPOT_DETOUR_TURN = 18,
     EXEC_DEPOT_DETOUR_ADVANCE = 19,
     EXEC_DEPOT_BLOCKED_WAIT = 20,
+    EXEC_DEPOT_ESCAPE_TURN = 21,
+    EXEC_DEPOT_ESCAPE_ADVANCE = 22,
 } exec_phase_t;
 
 static const char *TAG = "competition_run";
@@ -607,25 +609,34 @@ static void plan_depot_detour(const vision_status_t *v, uint8_t color)
     float blocker_col = NAN, blocker_row = NAN;
     depot_path_clear(v, color, &blocker_col, &blocker_row);
     motor_adapter_stop();
-    if (!isfinite(blocker_col) || !isfinite(blocker_row)) {
-        s_phase = EXEC_DEPOT_BLOCKED_WAIT;
+    const float bearing = atan2f(-(v->depot_row[color] - v->row),
+                                 v->depot_col[color] - v->col) * 57.2957795f;
+    const float first = isfinite(blocker_col) && isfinite(blocker_row) ?
+        heading_error(competition_depot_detour_heading(v->col, v->row,
+            v->depot_col[color], v->depot_row[color], blocker_col, blocker_row), bearing) :
+        COMPETITION_DEPOT_DETOUR_DEGREES;
+    const float offsets[] = {first, -first, copysignf(90.0f, first),
+                             -copysignf(90.0f, first)};
+    for (float offset : offsets) {
+        const float heading = wrap(bearing + offset);
+        const float radians = heading * 0.01745329252f;
+        const float end_col = v->col + COMPETITION_DEPOT_DETOUR_CELLS * cosf(radians);
+        const float end_row = v->row - COMPETITION_DEPOT_DETOUR_CELLS * sinf(radians);
+        if (!carried_turn_clear(v, color, heading) ||
+            !carried_segment_clear(v, color, end_col, end_row, heading)) continue;
+        s_detour_heading = heading;
+        s_detour_col = end_col;
+        s_detour_row = end_row;
+        s_phase = EXEC_DEPOT_DETOUR_TURN;
         return;
     }
-    const float heading = competition_depot_detour_heading(
-        v->col, v->row, v->depot_col[color], v->depot_row[color],
-        blocker_col, blocker_row);
-    const float radians = heading * 0.01745329252f;
-    const float end_col = v->col + COMPETITION_DEPOT_DETOUR_CELLS * cosf(radians);
-    const float end_row = v->row - COMPETITION_DEPOT_DETOUR_CELLS * sinf(radians);
-    if (!carried_turn_clear(v, color, heading) ||
-        !carried_segment_clear(v, color, end_col, end_row, heading)) {
-        s_phase = EXEC_DEPOT_BLOCKED_WAIT;
-        return;
-    }
-    s_detour_heading = heading;
-    s_detour_col = end_col;
-    s_detour_row = end_row;
-    s_phase = EXEC_DEPOT_DETOUR_TURN;
+    // None of the checked side routes works. Move away from the blockage and
+    // plan again from the new pose.
+    s_detour_heading = wrap(current_heading(v) + 180.0f);
+    const float radians = s_detour_heading * 0.01745329252f;
+    s_detour_col = v->col + COMPETITION_DEPOT_DETOUR_CELLS * cosf(radians);
+    s_detour_row = v->row - COMPETITION_DEPOT_DETOUR_CELLS * sinf(radians);
+    s_phase = EXEC_DEPOT_ESCAPE_TURN;
 }
 
 static bool reposition_safe(const vision_status_t *v, uint8_t color,
@@ -1188,6 +1199,20 @@ static void execute_local(const vision_status_t *v, competition_role_t role)
         }
         return;
     }
+    if (s_phase == EXEC_DEPOT_ESCAPE_TURN) {
+        if (turn_to(v, s_detour_heading, COMPETITION_HALF_PWM, true))
+            s_phase = EXEC_DEPOT_ESCAPE_ADVANCE;
+        return;
+    }
+    if (s_phase == EXEC_DEPOT_ESCAPE_ADVANCE) {
+        if (distance(v->col, v->row, s_detour_col, s_detour_row) <= 0.8f) {
+            motor_adapter_stop();
+            s_phase = EXEC_ALIGN_DEPOT;
+            return;
+        }
+        direct_drive(v, s_detour_col, s_detour_row, COMPETITION_HALF_PWM);
+        return;
+    }
     if (s_phase == EXEC_DEPOT_WAIT_VISION) {
         s_phase = EXEC_ALIGN_DEPOT;
         return;
@@ -1313,7 +1338,9 @@ bool competition_runtime_moving(void)
            s_phase == EXEC_DETOUR_ADVANCE || s_phase == EXEC_ALIGN_DEPOT ||
            s_phase == EXEC_VERIFY_DEPOT_ALIGNMENT || s_phase == EXEC_TO_DEPOT || s_phase == EXEC_PUSH ||
            s_phase == EXEC_REVERSE_AFTER_DELIVERY ||
-           s_phase == EXEC_ALIGN_REAR_TO_CENTER || s_phase == EXEC_REVERSE_TO_CENTER;
+           s_phase == EXEC_ALIGN_REAR_TO_CENTER || s_phase == EXEC_REVERSE_TO_CENTER ||
+           s_phase == EXEC_DEPOT_DETOUR_TURN || s_phase == EXEC_DEPOT_DETOUR_ADVANCE ||
+           s_phase == EXEC_DEPOT_ESCAPE_TURN || s_phase == EXEC_DEPOT_ESCAPE_ADVANCE;
 }
 bool competition_runtime_available(void)
 {
