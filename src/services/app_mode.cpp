@@ -4,6 +4,7 @@
 
 #include "app_storage.hpp"
 #include "board_pins.hpp"
+#include "competition_runtime.hpp"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -12,6 +13,7 @@
 #include "led_strip.h"
 #include "motor_adapter.hpp"
 #include "navigation_service.hpp"
+#include "vision_service.hpp"
 
 #define MODE_TASK_PERIOD_MS 20
 #define BUTTON_DEBOUNCE_TICKS 3
@@ -97,6 +99,7 @@ static void toggle_mode(void)
 static void set_indicator(uint8_t pulse)
 {
     uint8_t red = 0, green = 0, blue = 0;
+    const int64_t now_ms = esp_timer_get_time() / 1000;
     taskENTER_CRITICAL(&s_mode_lock);
     const app_mode_t mode = s_mode;
     const uint8_t failed = s_failed_step;
@@ -112,15 +115,31 @@ static void set_indicator(uint8_t pulse)
         if (elapsed < (uint32_t)failed * 400U && elapsed % 400U < 200U) red = 72;
     } else if (!ready) {
         /* Indicador apagado mientras la verificación está en curso. */
-    } else if (uncalibrated &&
-               (uint32_t)(esp_timer_get_time() / 1000 - epoch) % 1000U >= 500U) {
-        /* El color del rover parpadea a 1 Hz si el rumbo no quedó calibrado. */
-    } else if (s_identity == APP_STORAGE_ROVER_10) {
-        red = 72; green = 46;
-    } else if (s_identity == APP_STORAGE_ROVER_11) {
-        red = 50; blue = 72;
     } else {
-        red = 72;
+        vision_status_t vision = {};
+        vision_service_get_status(&vision);
+        const bool running = vision.connected && vision.protocol_valid &&
+            vision.phase == VISION_PHASE_RUNNING && vision.last_valid_frame_ms != 0 &&
+            now_ms >= (int64_t)vision.last_valid_frame_ms &&
+            now_ms - (int64_t)vision.last_valid_frame_ms <= 750;
+        if (running) {
+            competition_runtime_status_t runtime = {};
+            competition_runtime_get_status(&runtime);
+            switch (runtime.target_color) {
+                case VISION_CUBE_GREEN: green = 72; break;
+                case VISION_CUBE_BLUE: blue = 72; break;
+                case VISION_CUBE_RED: red = 72; break;
+                default: red = green = blue = 36; break;
+            }
+        } else if (s_identity == APP_STORAGE_ROVER_10) {
+            red = 72; green = 46;
+        } else if (s_identity == APP_STORAGE_ROVER_11) {
+            red = 50; blue = 72;
+        } else {
+            red = 72;
+        }
+        if (uncalibrated && (uint32_t)(now_ms - epoch) % 1000U >= 500U)
+            red = green = blue = 0;
     }
     if (led_strip_set_pixel(s_led, 0, red, green, blue) == ESP_OK) led_strip_refresh(s_led);
 }

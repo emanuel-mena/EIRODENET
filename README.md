@@ -74,7 +74,9 @@ infrarrojos.
 
 Cuando las verificaciones terminan correctamente, el color fijo identifica al
 rover: amarillo para rover 10, magenta para rover 11 y rojo si la identidad no
-es reconocida. Si el rumbo todavía no quedó calibrado, ese color parpadea a
+es reconocida. Al recibir tramas recientes de RUNNING, cambia al color del cubo
+asignado: verde, azul o rojo. Mientras RUNNING no tenga un objetivo asignado,
+se muestra blanco. Si el rumbo todavía no quedó calibrado, el color parpadea a
 1 Hz. El indicador no señala las fases de navegación ni la entrega de cubos.
 En modo de prueba, en cambio, el LED azul pulsa.
 
